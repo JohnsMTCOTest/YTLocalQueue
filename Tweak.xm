@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <malloc/malloc.h>
 
 #import "Headers/YouTubeHeader/YTPlayerViewController.h"
 #import <MediaPlayer/MediaPlayer.h>
@@ -108,6 +109,49 @@ static BOOL YTLP_ShowQueueButton(void) {
 static void ytlp_updateAutoplayState(void);
 static void ytlp_setupRemoteCommands(void);
 static void ytlp_captureVideoTap(id view, NSString *videoId, NSString *title);
+
+// ============================================================================
+// SAFE KVC HELPER
+// ============================================================================
+// CRASH FIX: Probing arbitrary views with valueForKey: for keys like "data" /
+// "entry" can return a non-object scalar (a boxed BOOL, a struct, or a raw
+// pointer). ARC then injects objc_retain on the result, which segfaults on the
+// garbage value (the 0x8004... addresses seen in the crash logs). @try/@catch
+// does NOT save us because that is a memory-access fault (SIGSEGV), not an
+// Objective-C NSException.
+//
+// This helper requires a real declared accessor before calling valueForKey:,
+// which avoids KVC's ivar/underscore fallback path that produces the garbage,
+// and validates the result is a genuine heap object before returning it.
+static id ytlp_safeValueForKey(id obj, NSString *key) {
+    if (!obj || key.length == 0) return nil;
+    // Require a real declared accessor. KVC's ivar/underscore fallback is what
+    // hands back boxed scalars / garbage pointers that crash objc_retain.
+    if (![obj respondsToSelector:NSSelectorFromString(key)]) return nil;
+
+    id result = nil;
+    @try {
+        result = [obj valueForKey:key];
+    } @catch (__unused NSException *e) {
+        return nil;
+    }
+    if (!result) return nil;
+
+    // Reject top-bit-set garbage like 0x8004... before anything retains it.
+    uintptr_t bits = (uintptr_t)result;
+    if (bits & 0x8000000000000000ULL) return nil;
+
+    // Allow tagged pointers (low bit set on arm64) through; otherwise require
+    // the pointer to be a real heap allocation.
+    if ((bits & 0x1) == 0) {
+        if (malloc_size((__bridge const void *)result) == 0) return nil;
+    }
+
+    // Final sanity: it must report a class.
+    if (object_getClass(result) == Nil) return nil;
+
+    return result;
+}
 
 // Interface for YTAutoplayAutonavController (like YouLoop declares)
 @interface YTAutoplayAutonavController : NSObject
@@ -327,7 +371,7 @@ static BOOL ytlp_shouldAllowQueueAdvance(NSString *reason) {
     }
 
     #if DEBUG
-    NSLog(@"[YTLocalQueue] ✓ Allowing advance: %@", reason);
+    NSLog(@"[YTLocalQueue] â Allowing advance: %@", reason);
     #endif
     return YES;
 }
@@ -423,7 +467,7 @@ static void ytlp_playNextFromQueue(void) {
         Class HUD = objc_getClass("GOOHUDManagerInternal");
         Class HUDMsg = objc_getClass("YTHUDMessage");
         if (HUD && HUDMsg) {
-            [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"✓ Queue complete"]];
+            [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"â Queue complete"]];
         }
         return;
     }
@@ -459,7 +503,7 @@ static void ytlp_playNextFromQueue(void) {
                 Class HUD = objc_getClass("GOOHUDManagerInternal");
                 Class HUDMsg = objc_getClass("YTHUDMessage");
                 if (HUD && HUDMsg) {
-                    [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"⚠ Navigation failed, video re-added"]];
+                    [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"â  Navigation failed, video re-added"]];
                 }
             } else if ([currentVideoId isEqualToString:nextId]) {
                 // Successfully navigated
@@ -484,8 +528,8 @@ static void ytlp_playNextFromQueue(void) {
             NSString *displayName = (nextTitle.length > 0) ? nextTitle : nextId;
             if (displayName.length > 40) displayName = [[displayName substringToIndex:37] stringByAppendingString:@"..."];
             NSString *message = (remaining > 0)
-                ? [NSString stringWithFormat:@"▶ %@ (%ld more)", displayName, (long)remaining]
-                : [NSString stringWithFormat:@"▶ %@ (last)", displayName];
+                ? [NSString stringWithFormat:@"â¶ %@ (%ld more)", displayName, (long)remaining]
+                : [NSString stringWithFormat:@"â¶ %@ (last)", displayName];
             [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:message]];
         }
     }
@@ -543,7 +587,7 @@ static void ytlp_playNextFromQueueForced(void) {
         Class HUD = objc_getClass("GOOHUDManagerInternal");
         Class HUDMsg = objc_getClass("YTHUDMessage");
         if (HUD && HUDMsg) {
-            [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"✓ Queue complete"]];
+            [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"â Queue complete"]];
         }
         return;
     }
@@ -567,8 +611,8 @@ static void ytlp_playNextFromQueueForced(void) {
         NSString *displayName = (nextTitle.length > 0) ? nextTitle : nextId;
         if (displayName.length > 40) displayName = [[displayName substringToIndex:37] stringByAppendingString:@"..."];
         NSString *message = (remaining > 0)
-            ? [NSString stringWithFormat:@"▶ %@ (%ld more)", displayName, (long)remaining]
-            : [NSString stringWithFormat:@"▶ %@ (last)", displayName];
+            ? [NSString stringWithFormat:@"â¶ %@ (%ld more)", displayName, (long)remaining]
+            : [NSString stringWithFormat:@"â¶ %@ (last)", displayName];
         [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:message]];
     }
 
@@ -593,7 +637,11 @@ static void ytlp_playNextFromQueueForced(void) {
     if (UIUtils && [UIUtils canOpenURL:url]) {
         [UIUtils openURL:url];
     }
-    ytlp_advanceInProgress = NO;
+
+    // CATCH-ALL: if neither the command handler nor the URL fallback returned
+    // above, make sure we don't leave the advance state permanently wedged
+    // (which would block all future advances via ytlp_shouldAllowQueueAdvance).
+    ytlp_resetState(@"forced nav exhausted");
 }
 
 // Helper function to check if a string looks like a YouTube video ID
@@ -1001,7 +1049,7 @@ static NSString *ytlp_resolveMenuVideoId(id action,
             
             // Also try the node property specifically for ASCollectionViewCell
             @try {
-                id node = [currentView valueForKey:@"node"];
+                id node = ytlp_safeValueForKey(currentView, @"node");
                 if (node) {
                     ytlp_collectAllVideoIds(node, 6, allIds, visited);
                 }
@@ -1049,7 +1097,7 @@ static void ytlp_extractVideoInfo(id entry, NSString **outVideoId, NSString **ou
             if ([entry respondsToSelector:@selector(videoId)]) {
                 videoId = [entry videoID];
             } else {
-                videoId = [entry valueForKey:@"videoId"];
+                videoId = ytlp_safeValueForKey(entry, @"videoId");
             }
             
             // Try deep search if not found
@@ -1072,7 +1120,7 @@ static void ytlp_extractVideoInfo(id entry, NSString **outVideoId, NSString **ou
                 NSArray *titleKeys = @[@"title", @"headline", @"videoTitle", @"name", @"displayName"];
                 for (NSString *key in titleKeys) {
                     @try {
-                        id titleValue = [entry valueForKey:key];
+                        id titleValue = ytlp_safeValueForKey(entry, key);
                         if ([titleValue isKindOfClass:[NSString class]] && [titleValue length] > 0) {
                             title = titleValue;
                             break;
@@ -1093,9 +1141,9 @@ static void ytlp_extractVideoInfo(id entry, NSString **outVideoId, NSString **ou
     if (title.length == 0 && entry) {
         @try {
             // Try videoRenderer path
-            id videoRenderer = [entry valueForKey:@"videoRenderer"];
+            id videoRenderer = ytlp_safeValueForKey(entry, @"videoRenderer");
             if (videoRenderer) {
-                id titleObj = [videoRenderer valueForKey:@"title"];
+                id titleObj = ytlp_safeValueForKey(videoRenderer, @"title");
                 if (titleObj) {
                     SEL runsSel = NSSelectorFromString(@"runs");
                     if ([titleObj respondsToSelector:runsSel]) {
@@ -1126,11 +1174,11 @@ static void ytlp_extractVideoInfo(id entry, NSString **outVideoId, NSString **ou
         // Try to get title from current player
         if (title.length == 0 && ytlp_currentPlayerVC) {
             @try {
-                id activeVideo = [ytlp_currentPlayerVC valueForKey:@"activeVideo"];
+                id activeVideo = ytlp_safeValueForKey(ytlp_currentPlayerVC, @"activeVideo");
                 if (activeVideo) {
-                    id singleVideo = [activeVideo valueForKey:@"singleVideo"];
+                    id singleVideo = ytlp_safeValueForKey(activeVideo, @"singleVideo");
                     if (singleVideo) {
-                        id video = [singleVideo valueForKey:@"video"];
+                        id video = ytlp_safeValueForKey(singleVideo, @"video");
                         if (video && [video respondsToSelector:@selector(title)]) {
                             title = [video title];
                         }
@@ -1164,21 +1212,37 @@ static CollectionViewCellSetSelectedIMP origCollectionViewCellSetSelected = NULL
 // Gesture recognizer approach disabled for now due to method signature issues
 
 static void ytlp_buttonSendActions(id self, SEL _cmd, NSUInteger controlEvents, id event) {
-    // Try to extract video info from button or its superview before the action
+    // CRASH FIX: Only probe buttons that live inside a video collection cell.
+    // The previous version hooked EVERY UIButton in the app and KVC-probed
+    // arbitrary keys ("data", "entry", ...) up the superview chain. On views
+    // that don't really have those keys (e.g. the settings switch cell), KVC's
+    // fallback returned non-object scalars / garbage pointers that crashed
+    // objc_retain (the EXC_BAD_ACCESS at 0x8004... seen in the crash logs).
+    // Gating to _ASCollectionViewCell + using ytlp_safeValueForKey eliminates
+    // both the crash source and a large amount of wasted work on every tap.
     @try {
-        NSString *videoId = nil;
-        NSString *title = nil;
-        
-        // Look in the button and its parent views for video information
-        UIView *currentView = self;
-        for (int level = 0; level < 10 && currentView; level++) {
-            @try {
-                // Try various video-related properties
-                id renderer = [currentView valueForKey:@"renderer"];
-                id videoData = [currentView valueForKey:@"videoData"];
-                id entry = [currentView valueForKey:@"entry"];
-                id data = [currentView valueForKey:@"data"];
-                
+        BOOL insideVideoCell = NO;
+        UIView *probe = [self isKindOfClass:[UIView class]] ? (UIView *)self : nil;
+        for (int i = 0; i < 10 && probe; i++) {
+            if ([probe isKindOfClass:NSClassFromString(@"_ASCollectionViewCell")]) {
+                insideVideoCell = YES;
+                break;
+            }
+            probe = [probe superview];
+        }
+
+        if (insideVideoCell) {
+            NSString *videoId = nil;
+            NSString *title = nil;
+
+            // Look in the button and its parent views for video information
+            UIView *currentView = (UIView *)self;
+            for (int level = 0; level < 10 && currentView; level++) {
+                id renderer  = ytlp_safeValueForKey(currentView, @"renderer");
+                id videoData = ytlp_safeValueForKey(currentView, @"videoData");
+                id entry     = ytlp_safeValueForKey(currentView, @"entry");
+                id data      = ytlp_safeValueForKey(currentView, @"data");
+
                 if (renderer) {
                     ytlp_extractVideoInfo(renderer, &videoId, &title);
                     if (videoId.length > 0) break;
@@ -1195,13 +1259,13 @@ static void ytlp_buttonSendActions(id self, SEL _cmd, NSUInteger controlEvents, 
                     ytlp_extractVideoInfo(data, &videoId, &title);
                     if (videoId.length > 0) break;
                 }
-            } @catch (__unused NSException *e) {}
-            
-            currentView = [currentView superview];
-        }
-        
-        if (videoId.length > 0) {
-            ytlp_captureVideoTap(self, videoId, title);
+
+                currentView = [currentView superview];
+            }
+
+            if (videoId.length > 0) {
+                ytlp_captureVideoTap(self, videoId, title);
+            }
         }
     } @catch (__unused NSException *e) {}
     
@@ -1219,7 +1283,7 @@ static void ytlp_collectionViewCellSetSelected(id self, SEL _cmd, BOOL selected)
             
             // Extract video info from the selected cell's node
             @try {
-                id node = [self valueForKey:@"node"];
+                id node = ytlp_safeValueForKey(self, @"node");
                 if (node) {
                     NSString *videoId = nil;
                     NSString *title = nil;
@@ -1469,7 +1533,7 @@ static void ytlp_handleVideoTimeChange(id self, YTSingleVideoTime *videoTime) {
             timeSinceLastAdvance > 10.0) { // Increased from 5.0 to 10.0 - less aggressive
 
             #if DEBUG
-            NSLog(@"[YTLocalQueue] ⚠️ Loop detected (backup): %.1f -> %.1f (this shouldn't happen often)", ytlp_lastTimeChangePosition, currentTime);
+            NSLog(@"[YTLocalQueue] â ï¸ Loop detected (backup): %.1f -> %.1f (this shouldn't happen often)", ytlp_lastTimeChangePosition, currentTime);
             #endif
 
             ytlp_endDetected = YES;
@@ -1595,7 +1659,7 @@ static NSMutableArray* ytlp_menuActionsForRenderers(id self, SEL _cmd, NSMutable
                     
                     for (NSString *property in cellProperties) {
                         @try {
-                            id value = [currentView valueForKey:property];
+                            id value = ytlp_safeValueForKey(currentView, property);
                             if (value) {
                                 // Try to extract video info from this property
                                 ytlp_extractVideoInfo(value, &videoId, &title);
@@ -1611,7 +1675,7 @@ static NSMutableArray* ytlp_menuActionsForRenderers(id self, SEL _cmd, NSMutable
                                     NSArray *nestedProps = @[@"renderer", @"viewModel", @"model", @"data", @"entry", @"videoId"];
                                     for (NSString *nested in nestedProps) {
                                         @try {
-                                            id nestedValue = [value valueForKey:nested];
+                                            id nestedValue = ytlp_safeValueForKey(value, nested);
                                             if (nestedValue) {
                                                 ytlp_extractVideoInfo(nestedValue, &videoId, &title);
                                                 if (videoId.length > 0) {
@@ -1637,7 +1701,7 @@ static NSMutableArray* ytlp_menuActionsForRenderers(id self, SEL _cmd, NSMutable
                     NSArray *properties = @[@"renderer", @"entry", @"videoData", @"data", @"model", @"viewModel"];
                     for (NSString *property in properties) {
                         @try {
-                            id value = [currentView valueForKey:property];
+                            id value = ytlp_safeValueForKey(currentView, property);
                             if (value) {
                                 ytlp_extractVideoInfo(value, &videoId, &title);
                                 if (videoId.length > 0) {
@@ -1670,7 +1734,7 @@ static NSMutableArray* ytlp_menuActionsForRenderers(id self, SEL _cmd, NSMutable
                     UIButton *btn = [act button];
                     if ([btn isKindOfClass:[UIButton class]]) title = btn.currentTitle;
                 }
-                if (title.length == 0) title = [act valueForKey:@"_title"];
+                if (title.length == 0) title = ytlp_safeValueForKey(act, @"_title");
             } @catch (__unused NSException *e) {}
             
             if (title.length > 0) {
@@ -1784,10 +1848,10 @@ static NSMutableArray* ytlp_menuActionsForRenderers(id self, SEL _cmd, NSMutable
                     if (resolvedTitle.length > 0) {
                         NSString *displayName = resolvedTitle;
                         if (displayName.length > 35) displayName = [[displayName substringToIndex:32] stringByAppendingString:@"..."];
-                        if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:[NSString stringWithFormat:@"✅ Added: %@", displayName]]];
+                        if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:[NSString stringWithFormat:@"â Added: %@", displayName]]];
                     } else {
                         // Show "Adding..." toast and fetch title in background
-                        if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"✅ Added to queue"]];
+                        if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"â Added to queue"]];
                         
                         // Fetch title from YouTube API and update the stored item
                         NSString *capturedVideoId = [resolvedVideoId copy];
@@ -1800,7 +1864,7 @@ static NSMutableArray* ytlp_menuActionsForRenderers(id self, SEL _cmd, NSMutable
                 } else {
                     Class HUD = objc_getClass("GOOHUDManagerInternal");
                     Class HUDMsg = objc_getClass("YTHUDMessage");
-                    if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"❌ Failed to add video"]];
+                    if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"â Failed to add video"]];
                 }
             };
 
@@ -1823,8 +1887,8 @@ static void ytlp_defaultSheetAddAction(id self, SEL _cmd, id action) {
         NSString *identifier = nil;
         
         @try {
-            identifier = [action valueForKey:@"_accessibilityIdentifier"];
-            if (identifier.length == 0) identifier = [action valueForKey:@"accessibilityIdentifier"];
+            identifier = ytlp_safeValueForKey(action, @"_accessibilityIdentifier");
+            if (identifier.length == 0) identifier = ytlp_safeValueForKey(action, @"accessibilityIdentifier");
         } @catch (__unused NSException *e) {}
 
         // Avoid recursion on our own injected actions
@@ -2342,7 +2406,7 @@ static void ytlp_createOverlayButtons(id controls, id target) {
             
             // Add to container
             @try {
-                id accessibilityContainer = [controls valueForKey:@"_topControlsAccessibilityContainerView"];
+                id accessibilityContainer = ytlp_safeValueForKey(controls, @"_topControlsAccessibilityContainerView");
                 if (accessibilityContainer) {
                     [accessibilityContainer addSubview:queueBtn];
                 } else {
@@ -2364,7 +2428,7 @@ static void ytlp_createOverlayButtons(id controls, id target) {
             
             // Add to container
             @try {
-                id accessibilityContainer = [controls valueForKey:@"_topControlsAccessibilityContainerView"];
+                id accessibilityContainer = ytlp_safeValueForKey(controls, @"_topControlsAccessibilityContainerView");
                 if (accessibilityContainer) {
                     [accessibilityContainer addSubview:nextBtn];
                 } else {
@@ -2433,9 +2497,12 @@ static void ytlp_overlayViewDidLoad(id self, SEL _cmd) {
     id controls = nil;
     
     @try {
-        controls = [overlayView valueForKey:@"_controlsOverlayView"];
+        controls = ytlp_safeValueForKey(overlayView, @"_controlsOverlayView");
     } @catch (__unused NSException *e) {
         controls = [overlayView controlsOverlayView];
+    }
+    if (!controls) {
+        @try { controls = [overlayView controlsOverlayView]; } @catch (__unused NSException *e) {}
     }
     
     if (!controls) return;
@@ -2453,7 +2520,7 @@ static void ytlp_overlayViewDidLoad(id self, SEL _cmd) {
 }
 
 static void ytlp_addToQueueTapped(id self, SEL _cmd, id sender) {
-    id playerVC = [self valueForKey:@"_playerViewController"];
+    id playerVC = ytlp_safeValueForKey(self, @"_playerViewController");
     NSString *videoId = nil;
     NSString *title = nil;
     ytlp_extractVideoInfo(playerVC, &videoId, &title);
@@ -2466,10 +2533,10 @@ static void ytlp_addToQueueTapped(id self, SEL _cmd, id sender) {
         if (title.length > 0) {
             NSString *displayName = title;
             if (displayName.length > 35) displayName = [[displayName substringToIndex:32] stringByAppendingString:@"..."];
-            if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:[NSString stringWithFormat:@"✅ Added: %@", displayName]]];
+            if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:[NSString stringWithFormat:@"â Added: %@", displayName]]];
         } else {
             // Show simple toast and fetch title in background
-            if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"✅ Added to queue"]];
+            if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"â Added to queue"]];
             
             NSString *capturedVideoId = [videoId copy];
             ytlp_fetchTitleForVideoId(capturedVideoId, ^(NSString *fetchedTitle) {
@@ -2479,7 +2546,7 @@ static void ytlp_addToQueueTapped(id self, SEL _cmd, id sender) {
             });
         }
     } else {
-        if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"❌ Could not add video"]];
+        if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"â Could not add video"]];
     }
 }
 
@@ -2548,10 +2615,17 @@ static void ytlp_overlayDidPressNext(id self, SEL _cmd, id sender) {
 // Installation function
 __attribute__((constructor)) static void YTLP_InstallTweakHooks(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
+        // BUG FIX: The previous version stored the retry block in a __weak
+        // variable while the only strong reference lived on the constructor's
+        // stack frame. By the time the 0.5s dispatch_after retry fired, that
+        // frame had returned and the block was deallocated -> the retry either
+        // silently died or jumped through a freed block. We keep a strong heap
+        // copy alive in __block storage and nil it out when installation
+        // finishes, so the retry chain is always valid.
         __block int attemptsRemaining = 20; // ~10s max with 0.5s intervals
-        __block void (^ __weak weakTryInstall)(void);
-        void (^tryInstall)(void);
-        weakTryInstall = tryInstall = ^{
+        __block void (^tryInstallHolder)(void) = nil;
+
+        void (^tryInstall)(void) = ^{
             BOOL allInstalled = YES;
 
             // Hook YTPlayerViewController
@@ -2942,16 +3016,21 @@ __attribute__((constructor)) static void YTLP_InstallTweakHooks(void) {
             }
 
             if (allInstalled) {
+                tryInstallHolder = nil; // release the retry block
                 return;
             }
             if (--attemptsRemaining <= 0) {
+                tryInstallHolder = nil; // release the retry block
                 return;
             }
-            void (^strongTryInstall)(void) = weakTryInstall;
+            void (^strongTryInstall)(void) = tryInstallHolder;
             if (strongTryInstall) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), strongTryInstall);
             }
         };
-        tryInstall();
+
+        // Keep a strong heap copy alive for the retry chain.
+        tryInstallHolder = [tryInstall copy];
+        tryInstallHolder();
     });
 }

@@ -25,7 +25,7 @@ jobs:
           make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
 
       - name: Upload Compiled Package
-        uses: actions/artifacts@v4
+        uses: actions/upload-artifact@v4
         with:
           name: YTLocalQueue-Build
           path: packages/*.deb

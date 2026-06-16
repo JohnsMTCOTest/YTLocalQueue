@@ -17,8 +17,8 @@ jobs:
 
       - name: Fetch YouTube Headers
         run: |
-          mkdir -p Headers
-          git clone https://github.com Headers/YouTubeHeader
+          git clone --depth=1 https://github.com/PoomSmart/YouTubeHeader.git Headers/YouTubeHeader
+          git clone --depth=1 https://github.com/PoomSmart/PSHeader.git Headers/PSHeader
 
       - name: Build Tweak
         run: |

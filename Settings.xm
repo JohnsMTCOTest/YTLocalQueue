@@ -51,6 +51,7 @@ static id ytlp_makeSelectItem(Class cls, NSString *title, YTLPSelectBlock block)
 
 // Forward decls used by the tap-to-toggle helper.
 static void ytlp_refreshSettings(void);
+static void ytlp_refreshSettingsFromCell(id cell);
 
 // Build a tap-to-toggle row. This deliberately AVOIDS the switchItem:...switchBlock:
 // path. Disassembly of the crashing build showed the BOOL argument that sits
@@ -74,13 +75,15 @@ static id ytlp_makeToggleRow(Class cls, NSString *label, NSString *defaultsKey, 
         [d setBool:!now forKey:keyCopy];
         // Rebuild + reload the settings list so this row's "On/Off" text updates
         // in place (YTUHD-style reloadData on the settings view controller).
-        ytlp_refreshSettings();
+        // Pass the tapped cell so we can locate the live settings VC via its
+        // responder chain (more reliable than the captured weak manager ref).
+        ytlp_refreshSettingsFromCell(cell);
         return YES;
     });
 }
 
 static const NSInteger YTLocalQueueSection = 931; // unique tweak section id
-static NSString *const kYTLPVersion = @"0.0.1+build22";
+static NSString *const kYTLPVersion = @"0.0.1+build23-TEST";
 
 __attribute__((unused)) static BOOL YTLP_AutoAdvanceEnabled(void) {
     return [[NSUserDefaults standardUserDefaults] boolForKey:@"ytlp_queue_auto_advance_enabled"];
@@ -278,6 +281,46 @@ static void ytlp_refreshSettings(void) {
     if (vc && [vc respondsToSelector:reloadSel]) {
         ((void (*)(id, SEL))objc_msgSend)(vc, reloadSel);
     }
+}
+
+// Reload by locating the settings view controller from the tapped cell's
+// responder chain. This does not depend on the captured (weak) manager ref, so
+// it works even if that reference is stale. Falls back to ytlp_refreshSettings.
+static void ytlp_refreshSettingsFromCell(id cell) {
+    // First, rebuild our section's item data via the manager (if we have it),
+    // so the On/Off titles are current before the reload.
+    id mgr = gYTLPSettingsManager;
+    if (mgr) {
+        SEL upd = sel_getUid("updateSectionForCategory:withEntry:");
+        if ([mgr respondsToSelector:upd]) {
+            ((void (*)(id, SEL, NSUInteger, id))objc_msgSend)(mgr, upd, (NSUInteger)YTLocalQueueSection, nil);
+        }
+    }
+
+    SEL reloadSel = sel_getUid("reloadData");
+
+    // Walk up the responder chain from the cell to find a view controller that
+    // responds to reloadData (the YTSettingsViewController).
+    id responder = cell;
+    @try {
+        if ([cell isKindOfClass:[UIView class]]) {
+            responder = cell;
+        }
+    } @catch (__unused NSException *e) {}
+
+    UIResponder *r = [cell isKindOfClass:[UIResponder class]] ? (UIResponder *)cell : nil;
+    int hops = 0;
+    while (r && hops < 30) {
+        if ([r respondsToSelector:reloadSel]) {
+            ((void (*)(id, SEL))objc_msgSend)(r, reloadSel);
+            return;
+        }
+        r = r.nextResponder;
+        hops++;
+    }
+
+    // Fallback: the manager-based path.
+    ytlp_refreshSettings();
 }
 
 __attribute__((constructor)) static void YTLP_InstallSettingsHooks(void) {

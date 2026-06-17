@@ -2428,6 +2428,40 @@ static void ytlp_setTopOverlayVisible(id self, SEL _cmd, BOOL visible, BOOL canc
         for (UIView *button in [overlayButtons allValues]) {
             button.alpha = alpha;
         }
+        // ---- Reposition buttons (build23-TEST): we learned from on-device
+        // diagnostics that the buttons live in YTMainAppControlsOverlayView with
+        // a plain frame at the far right (x~356 in a ~440-wide bounds), which is
+        // why they overlapped Cast/CC. Move them LEFT of that cluster. The
+        // superview uses plain frames (not Auto Layout), so setting .frame here
+        // -- after YouTube's own layout in the orig call above -- sticks.
+        if (alpha > 0.0) {
+            @try {
+                UIView *queueBtn = overlayButtons[@"showQueue"];
+                UIView *nextBtn  = overlayButtons[@"nextFromQueue"];
+                UIView *anyBtn = queueBtn ?: nextBtn;
+                UIView *sv = anyBtn.superview;
+                if (sv) {
+                    CGFloat w = anyBtn.bounds.size.width > 0 ? anyBtn.bounds.size.width : 24.0;
+                    CGFloat h = anyBtn.bounds.size.height > 0 ? anyBtn.bounds.size.height : 40.0;
+                    CGFloat y = anyBtn.frame.origin.y > 0 ? anyBtn.frame.origin.y : 12.0;
+                    CGFloat gap = 8.0;
+                    // Place to the LEFT of the right-edge cluster. The native
+                    // right cluster occupies roughly the last ~90pt; start left
+                    // of that and lay our buttons out leftward from there.
+                    CGFloat rightAnchor = sv.bounds.size.width - 100.0;
+                    CGFloat x = rightAnchor;
+                    if (nextBtn) {
+                        x -= w;
+                        nextBtn.frame = CGRectMake(x, y, w, h);
+                        x -= gap;
+                    }
+                    if (queueBtn) {
+                        x -= w;
+                        queueBtn.frame = CGRectMake(x, y, w, h);
+                    }
+                }
+            } @catch (__unused NSException *e) {}
+        }
         // ---- TEMP DIAGNOSTICS (build23-TEST) ----
         // Record what's actually positioning the buttons so we can read it back
         // in the Local Queue settings screen (no Mac/Console needed).

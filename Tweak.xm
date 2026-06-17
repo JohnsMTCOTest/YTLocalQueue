@@ -2341,13 +2341,19 @@ static void ytlp_createOverlayButtons(id controls, id target) {
             [(UIView *)queueBtn setAlpha:0]; // Start invisible, will be shown by setTopOverlayVisible
             [queueBtn addTarget:target action:@selector(ytlp_showQueueTapped:) forControlEvents:UIControlEventTouchUpInside];
             overlayButtons[@"showQueue"] = queueBtn;
-            // NOTE: We deliberately DO NOT addSubview here. These buttons are
-            // created with YouTube's own buttonWithImage: factory and are placed
-            // into the top control row via the topControls/topButtonControls
-            // array hooks, where YouTube lays them out (and spaces them) like its
-            // native buttons. Adding them manually as subviews too produced a
-            // SECOND copy at a default position, which is what overlapped the
-            // Cast/CC buttons. Array-only = clean native layout, no overlap.
+            
+            // The manual addSubview IS the real render path on this build (the
+            // topControls array hook alone does not display them). Add as subview.
+            @try {
+                id accessibilityContainer = ytlp_safeValueForKey(controls, @"_topControlsAccessibilityContainerView");
+                if (accessibilityContainer) {
+                    [accessibilityContainer addSubview:queueBtn];
+                } else {
+                    [controls addSubview:queueBtn];
+                }
+            } @catch (__unused NSException *e) {
+                [controls addSubview:queueBtn];
+            }
         }
         
         // Create "Next from Queue" button (if enabled)
@@ -2358,7 +2364,17 @@ static void ytlp_createOverlayButtons(id controls, id target) {
             [(UIView *)nextBtn setAlpha:0]; // Start invisible, will be shown by setTopOverlayVisible
             [nextBtn addTarget:target action:@selector(ytlp_nextFromQueueTapped:) forControlEvents:UIControlEventTouchUpInside];
             overlayButtons[@"nextFromQueue"] = nextBtn;
-            // No manual addSubview (see note above) -- array layout only.
+            
+            @try {
+                id accessibilityContainer = ytlp_safeValueForKey(controls, @"_topControlsAccessibilityContainerView");
+                if (accessibilityContainer) {
+                    [accessibilityContainer addSubview:nextBtn];
+                } else {
+                    [controls addSubview:nextBtn];
+                }
+            } @catch (__unused NSException *e) {
+                [controls addSubview:nextBtn];
+            }
         }
         
         ytlp_setOverlayButtons(controls, overlayButtons);
@@ -2378,6 +2394,8 @@ static NSMutableArray *ytlp_topControls(id self, SEL _cmd) {
         // into the top-left next to the collapse chevron. Order: Queue then Next.
         if (queueBtn && YTLP_ShowQueueButton()) [controls addObject:queueBtn];
         if (nextBtn && YTLP_ShowPlayNextButton()) [controls addObject:nextBtn];
+        // TEMP DIAGNOSTIC: note that this array hook fired and how many controls.
+        [[NSUserDefaults standardUserDefaults] setObject:[NSString stringWithFormat:@"topControls fired, count=%lu", (unsigned long)controls.count] forKey:@"ytlp_dbg_array"];
     }
 
     return controls;
@@ -2393,6 +2411,7 @@ static NSMutableArray *ytlp_topButtonControls(id self, SEL _cmd) {
         // Right-side placement (see note in ytlp_topControls).
         if (queueBtn && YTLP_ShowQueueButton()) [controls addObject:queueBtn];
         if (nextBtn && YTLP_ShowPlayNextButton()) [controls addObject:nextBtn];
+        [[NSUserDefaults standardUserDefaults] setObject:[NSString stringWithFormat:@"topButtonControls fired, count=%lu", (unsigned long)controls.count] forKey:@"ytlp_dbg_arraybtn"];
     }
 
     return controls;
@@ -2408,6 +2427,26 @@ static void ytlp_setTopOverlayVisible(id self, SEL _cmd, BOOL visible, BOOL canc
     if (overlayButtons) {
         for (UIView *button in [overlayButtons allValues]) {
             button.alpha = alpha;
+        }
+        // ---- TEMP DIAGNOSTICS (build23-TEST) ----
+        // Record what's actually positioning the buttons so we can read it back
+        // in the Local Queue settings screen (no Mac/Console needed).
+        if (alpha > 0.0) {
+            @try {
+                UIView *qb = overlayButtons[@"showQueue"];
+                UIView *anyBtn = qb ?: overlayButtons[@"nextFromQueue"];
+                if (anyBtn) {
+                    UIView *sv = anyBtn.superview;
+                    NSString *svClass = sv ? NSStringFromClass([sv class]) : @"(nil superview)";
+                    CGRect f = anyBtn.frame;
+                    CGRect svb = sv ? sv.bounds : CGRectZero;
+                    NSString *info = [NSString stringWithFormat:
+                        @"super=%@ btnFrame={%.0f,%.0f,%.0f,%.0f} superBounds={%.0f,%.0f}",
+                        svClass, f.origin.x, f.origin.y, f.size.width, f.size.height,
+                        svb.size.width, svb.size.height];
+                    [[NSUserDefaults standardUserDefaults] setObject:info forKey:@"ytlp_dbg_button"];
+                }
+            } @catch (__unused NSException *e) {}
         }
     }
 }

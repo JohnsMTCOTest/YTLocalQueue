@@ -133,6 +133,11 @@ typedef NS_ENUM(NSInteger, YTLPQueueSection) {
                 });
             }];
         }
+    } else {
+        // No active video (player closed or nothing playing). Clear the stale
+        // "Now Playing" entry so the queue view doesn't keep showing a video
+        // that is no longer playing.
+        [[YTLPLocalQueueManager shared] setCurrentlyPlayingVideoId:nil title:nil];
     }
 }
 

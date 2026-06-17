@@ -2152,17 +2152,32 @@ static id ytlp_createQueueEndpoint(NSString *videoId) {
 static NSString *ytlp_getNextQueueVideoId(void) {
     if (!YTLP_AutoAdvanceEnabled()) return nil;
 
-    // First priority: consumed video ID
+    // First priority: a freshly-consumed video ID that we are about to navigate
+    // to. IMPORTANT: only use it if it is DIFFERENT from the video currently
+    // playing. Otherwise we'd hand YouTube the same video that just finished,
+    // and its autonav would replay it endlessly (the "last video loops forever"
+    // bug). Once the consumed id matches what's actually on screen, it's stale.
     if (ytlp_currentPlayingVideoId.length > 0) {
-        return ytlp_currentPlayingVideoId;
+        NSString *onScreen = nil;
+        if (ytlp_currentPlayerVC) {
+            @try { onScreen = [ytlp_currentPlayerVC currentVideoID]; } @catch (__unused NSException *e) {}
+        }
+        if (onScreen.length == 0 || ![onScreen isEqualToString:ytlp_currentPlayingVideoId]) {
+            return ytlp_currentPlayingVideoId;
+        }
+        // Consumed id is now the on-screen video -> it's stale; clear it so we
+        // don't keep handing it back, and fall through to the real queue.
+        ytlp_currentPlayingVideoId = nil;
     }
 
-    // Second priority: peek at queue
+    // Second priority: peek at the queue (a genuinely different, pending video).
     if (![[YTLPLocalQueueManager shared] isEmpty]) {
         NSDictionary *nextItem = [[YTLPLocalQueueManager shared] peekNextItem];
         return nextItem[@"videoId"];
     }
 
+    // Queue is empty and nothing new to play -> return nil so YouTube's autonav
+    // does its own default (stop / its own suggestion) instead of looping ours.
     return nil;
 }
 
@@ -2369,33 +2384,35 @@ static void ytlp_createOverlayButtons(id controls, id target) {
 // Hook topControls/topButtonControls to insert our buttons into the controls array
 static NSMutableArray *ytlp_topControls(id self, SEL _cmd) {
     NSMutableArray *controls = origTopControls ? origTopControls(self, _cmd) : [NSMutableArray array];
-    
+
     NSDictionary *overlayButtons = ytlp_getOverlayButtons(self);
     if (overlayButtons) {
         id nextBtn = overlayButtons[@"nextFromQueue"];
         id queueBtn = overlayButtons[@"showQueue"];
-        // Insert in order: Next, Queue (so Next appears first/leftmost)
-        // Only insert if the button exists (which means the setting was enabled when created)
-        if (queueBtn && YTLP_ShowQueueButton()) [controls insertObject:queueBtn atIndex:0];
-        if (nextBtn && YTLP_ShowPlayNextButton()) [controls insertObject:nextBtn atIndex:0];
+        // Insert our buttons in the MIDDLE of the existing controls so they sit
+        // centered in the top control row, rather than jammed to the far left
+        // (which is what inserting at index 0 produced).
+        NSUInteger mid = controls.count / 2;
+        if (queueBtn && YTLP_ShowQueueButton()) { [controls insertObject:queueBtn atIndex:MIN(mid, controls.count)]; }
+        if (nextBtn && YTLP_ShowPlayNextButton()) { [controls insertObject:nextBtn atIndex:MIN(mid, controls.count)]; }
     }
-    
+
     return controls;
 }
 
 static NSMutableArray *ytlp_topButtonControls(id self, SEL _cmd) {
     NSMutableArray *controls = origTopButtonControls ? origTopButtonControls(self, _cmd) : [NSMutableArray array];
-    
+
     NSDictionary *overlayButtons = ytlp_getOverlayButtons(self);
     if (overlayButtons) {
         id nextBtn = overlayButtons[@"nextFromQueue"];
         id queueBtn = overlayButtons[@"showQueue"];
-        // Insert in order: Next, Queue (so Next appears first/leftmost)
-        // Only insert if the button exists (which means the setting was enabled when created)
-        if (queueBtn && YTLP_ShowQueueButton()) [controls insertObject:queueBtn atIndex:0];
-        if (nextBtn && YTLP_ShowPlayNextButton()) [controls insertObject:nextBtn atIndex:0];
+        // Center among existing controls (see note in ytlp_topControls).
+        NSUInteger mid = controls.count / 2;
+        if (queueBtn && YTLP_ShowQueueButton()) { [controls insertObject:queueBtn atIndex:MIN(mid, controls.count)]; }
+        if (nextBtn && YTLP_ShowPlayNextButton()) { [controls insertObject:nextBtn atIndex:MIN(mid, controls.count)]; }
     }
-    
+
     return controls;
 }
 

@@ -2304,6 +2304,14 @@ static TopControlsIMP origTopButtonControls = NULL;
 typedef void (*SetTopOverlayVisibleIMP)(id, SEL, BOOL, BOOL);
 static SetTopOverlayVisibleIMP origSetTopOverlayVisible = NULL;
 
+// layoutSubviews hook: setting button frames in setTopOverlayVisible doesn't
+// stick because YouTube re-lays-out the control row afterward (proven by
+// diagnostics: we set x=57, YouTube moved it to x=356 on the next tick). By
+// repositioning at the END of layoutSubviews -- which runs as part of every
+// layout pass -- our frame is the last word and is no longer overridden.
+typedef void (*LayoutSubviewsIMP)(id, SEL);
+static LayoutSubviewsIMP origControlsLayoutSubviews = NULL;
+
 
 // Associated object key for storing our buttons on the controls view
 static const char *kYTLPOverlayButtonsKey = "ytlp_overlayButtons";
@@ -2417,6 +2425,59 @@ static NSMutableArray *ytlp_topButtonControls(id self, SEL _cmd) {
     return controls;
 }
 
+// Position our two buttons within the controls overlay. Called from BOTH
+// setTopOverlayVisible (initial show) AND layoutSubviews (every layout pass) so
+// YouTube's relayout can't override us -- we always run last.
+static void ytlp_layoutOverlayButtons(id controlsView) {
+    NSDictionary *overlayButtons = ytlp_getOverlayButtons(controlsView);
+    if (!overlayButtons.count) return;
+    @try {
+        UIView *queueBtn = overlayButtons[@"showQueue"];
+        UIView *nextBtn  = overlayButtons[@"nextFromQueue"];
+        UIView *anyBtn = queueBtn ?: nextBtn;
+        UIView *sv = anyBtn.superview;
+        if (!sv || sv.bounds.size.width <= 100.0) return; // not laid out yet
+        // Only position while our buttons are meant to be visible.
+        if (anyBtn.alpha <= 0.01) return;
+
+        CGFloat w = anyBtn.bounds.size.width > 0 ? anyBtn.bounds.size.width : 24.0;
+        CGFloat h = anyBtn.bounds.size.height > 0 ? anyBtn.bounds.size.height : 40.0;
+        CGFloat svW = sv.bounds.size.width;
+
+        // Match the native top buttons' vertical position.
+        CGFloat topY = 12.0;
+        for (UIView *child in sv.subviews) {
+            if (child == queueBtn || child == nextBtn) continue;
+            CGRect cf = child.frame;
+            BOOL nearTop = cf.origin.y < 80.0 && cf.origin.y > 0;
+            BOOL onRight = cf.origin.x > svW * 0.55;
+            BOOL smallish = cf.size.width > 0 && cf.size.width < 80.0 && cf.size.height < 80.0;
+            if (nearTop && onRight && smallish && !child.hidden && child.alpha > 0.01) {
+                topY = cf.origin.y;
+                break;
+            }
+        }
+
+        // Open top band: just right of the collapse chevron, laid out rightward,
+        // well left of the center pause control and the right-side cluster.
+        CGFloat gap = 10.0;
+        CGFloat x = svW * 0.13;
+        if (queueBtn) {
+            queueBtn.frame = CGRectMake(x, topY, w, h);
+            x += w + gap;
+        }
+        if (nextBtn) {
+            nextBtn.frame = CGRectMake(x, topY, w, h);
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+// Hook layoutSubviews so we reposition AFTER YouTube's own layout, every pass.
+static void ytlp_controlsLayoutSubviews(id self, SEL _cmd) {
+    if (origControlsLayoutSubviews) origControlsLayoutSubviews(self, _cmd);
+    ytlp_layoutOverlayButtons(self);
+}
+
 // Hook setTopOverlayVisible to control button visibility (alpha)
 static void ytlp_setTopOverlayVisible(id self, SEL _cmd, BOOL visible, BOOL canceledState) {
     if (origSetTopOverlayVisible) origSetTopOverlayVisible(self, _cmd, visible, canceledState);
@@ -2428,85 +2489,8 @@ static void ytlp_setTopOverlayVisible(id self, SEL _cmd, BOOL visible, BOOL canc
         for (UIView *button in [overlayButtons allValues]) {
             button.alpha = alpha;
         }
-        // ---- Reposition buttons (build23-TEST): place our buttons in the OPEN
-        // band along the top, left of the center pause control and aligned with
-        // the native top button row (same y). This area is empty, so there's no
-        // cluster to collide with. We anchor proportionally to the player width
-        // so it holds across different sizes, and match the native button y by
-        // sampling a native top-row control when we can find one.
         if (alpha > 0.0) {
-            @try {
-                UIView *queueBtn = overlayButtons[@"showQueue"];
-                UIView *nextBtn  = overlayButtons[@"nextFromQueue"];
-                UIView *anyBtn = queueBtn ?: nextBtn;
-                UIView *sv = anyBtn.superview;
-                // Guard: skip until the superview is actually laid out.
-                if (sv && sv.bounds.size.width > 100.0) {
-                    CGFloat w = anyBtn.bounds.size.width > 0 ? anyBtn.bounds.size.width : 24.0;
-                    CGFloat h = anyBtn.bounds.size.height > 0 ? anyBtn.bounds.size.height : 40.0;
-                    CGFloat svW = sv.bounds.size.width;
-
-                    // Match the native top buttons' vertical position: sample the
-                    // y of a native top-right control if present, else default 12.
-                    CGFloat topY = 12.0;
-                    for (UIView *child in sv.subviews) {
-                        if (child == queueBtn || child == nextBtn) continue;
-                        CGRect cf = child.frame;
-                        BOOL nearTop = cf.origin.y < 80.0 && cf.origin.y > 0;
-                        BOOL onRight = cf.origin.x > svW * 0.55;
-                        BOOL smallish = cf.size.width > 0 && cf.size.width < 80.0 && cf.size.height < 80.0;
-                        if (nearTop && onRight && smallish && !child.hidden && child.alpha > 0.01) {
-                            topY = cf.origin.y;
-                            break;
-                        }
-                    }
-
-                    // Open top band: start at ~13% of the width (just right of the
-                    // collapse chevron) and lay the two buttons out rightward.
-                    // This keeps them well left of the center pause control and
-                    // clear of the right-side cluster.
-                    CGFloat gap = 10.0;
-                    CGFloat x = svW * 0.13;
-                    if (queueBtn) {
-                        queueBtn.frame = CGRectMake(x, topY, w, h);
-                        x += w + gap;
-                    }
-                    if (nextBtn) {
-                        nextBtn.frame = CGRectMake(x, topY, w, h);
-                    }
-                }
-            } @catch (__unused NSException *e) {}
-        }
-        // ---- TEMP DIAGNOSTICS (build23-TEST) ----
-        // Record what's actually positioning the buttons so we can read it back
-        // in the Local Queue settings screen (no Mac/Console needed).
-        if (alpha > 0.0) {
-            @try {
-                UIView *qb = overlayButtons[@"showQueue"];
-                UIView *anyBtn = qb ?: overlayButtons[@"nextFromQueue"];
-                if (anyBtn) {
-                    UIView *sv = anyBtn.superview;
-                    NSString *svClass = sv ? NSStringFromClass([sv class]) : @"(nil superview)";
-                    CGRect f = anyBtn.frame;
-                    CGRect svb = sv ? sv.bounds : CGRectZero;
-                    NSString *info = [NSString stringWithFormat:
-                        @"setX=%.0f super=%@ svW=%.0f",
-                        f.origin.x, svClass, svb.size.width];
-                    [[NSUserDefaults standardUserDefaults] setObject:info forKey:@"ytlp_dbg_button"];
-
-                    // Deferred re-read: if YouTube re-lays-out after us, the frame
-                    // we just set will have changed by the next runloop tick. This
-                    // tells us definitively whether our positioning is overridden.
-                    __strong UIView *btnStrong = anyBtn;
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        @try {
-                            CGRect later = btnStrong.frame;
-                            NSString *info2 = [NSString stringWithFormat:@"laterX=%.0f laterY=%.0f", later.origin.x, later.origin.y];
-                            [[NSUserDefaults standardUserDefaults] setObject:info2 forKey:@"ytlp_dbg_button2"];
-                        } @catch (__unused NSException *e) {}
-                    });
-                }
-            } @catch (__unused NSException *e) {}
+            ytlp_layoutOverlayButtons(self);
         }
     }
 }
@@ -3028,6 +3012,31 @@ __attribute__((constructor)) static void YTLP_InstallTweakHooks(void) {
                 if (setVisibleMethod && !origSetTopOverlayVisible) {
                     origSetTopOverlayVisible = (SetTopOverlayVisibleIMP)method_getImplementation(setVisibleMethod);
                     method_setImplementation(setVisibleMethod, (IMP)ytlp_setTopOverlayVisible);
+                }
+
+                // Hook layoutSubviews so we reposition our buttons at the end of
+                // every layout pass (YouTube's relayout would otherwise override
+                // any frame we set elsewhere -- confirmed via diagnostics).
+                // IMPORTANT: only swizzle if THIS class defines layoutSubviews
+                // itself; otherwise class_getInstanceMethod returns UIView's IMP
+                // and we'd be swizzling UIView app-wide (dangerous). We detect
+                // this by comparing against the superclass's IMP.
+                if (!origControlsLayoutSubviews) {
+                    Method layoutMethod = class_getInstanceMethod(ControlsOverlayView, @selector(layoutSubviews));
+                    Class superCls = class_getSuperclass(ControlsOverlayView);
+                    Method superLayout = superCls ? class_getInstanceMethod(superCls, @selector(layoutSubviews)) : NULL;
+                    IMP ownIMP = layoutMethod ? method_getImplementation(layoutMethod) : NULL;
+                    IMP superIMP = superLayout ? method_getImplementation(superLayout) : NULL;
+                    if (layoutMethod && ownIMP && ownIMP != superIMP) {
+                        // Class overrides layoutSubviews -> safe to swizzle it.
+                        origControlsLayoutSubviews = (LayoutSubviewsIMP)ownIMP;
+                        method_setImplementation(layoutMethod, (IMP)ytlp_controlsLayoutSubviews);
+                    } else {
+                        // Class does not override -> add our own override that
+                        // calls super via the inherited IMP.
+                        origControlsLayoutSubviews = (LayoutSubviewsIMP)superIMP;
+                        class_addMethod(ControlsOverlayView, @selector(layoutSubviews), (IMP)ytlp_controlsLayoutSubviews, "v@:");
+                    }
                 }
             }
 

@@ -2404,31 +2404,17 @@ static NSMutableArray *ytlp_topButtonControls(id self, SEL _cmd) {
     return origTopButtonControls ? origTopButtonControls(self, _cmd) : [NSMutableArray array];
 }
 
-// Position our two buttons within the controls overlay. Called from BOTH
-// setTopOverlayVisible (initial show) AND layoutSubviews (every layout pass) so
-// YouTube's relayout can't override us -- we always run last.
+// Position our two buttons within the controls overlay. Called from
+// setTopOverlayVisible and layoutSubviews.
 //
-// PERF: layoutSubviews fires many times per second. The native-cluster scan
-// (a BFS over the whole overlay tree) is far too expensive to run every pass --
-// doing so caused severe lag. So we CACHE the computed landscape anchor and only
-// re-run the scan when the orientation or container width actually changes
-// (cache key). On the common path we just set frames from cached values, which
-// is cheap.
-static BOOL   ytlp_cacheValid = NO;
-static BOOL   ytlp_cacheLandscape = NO;
-static CGFloat ytlp_cacheAnchorX = -1;  // nativeLeftXInWidest (widest coords)
-static CGFloat ytlp_cacheAnchorY = 0;   // nativeTopYInWidest (widest coords)
-static CGFloat ytlp_cacheTopYLocal = 12.0;
-// PERF DIAGNOSTIC (cheap): count total layout calls vs expensive scans. A
-// healthy ratio is almost all calls hitting the cache (few scans). Written to
-// defaults only once every 60 calls to avoid per-frame cost.
-static unsigned long ytlp_layoutCalls = 0;
-static unsigned long ytlp_scanCalls = 0;
-// Tracks the alpha our buttons SHOULD have (driven by setTopOverlayVisible).
-// The transition guard temporarily forces alpha 0; once geometry settles we
-// restore this value so the buttons reappear in sync with the native controls.
-static CGFloat ytlp_desiredAlpha = 1.0;
-
+// DESIGN: Keep this DEAD SIMPLE. Earlier versions walked YouTube's view tree
+// every layout pass to anchor beside the native controls; that scanning was
+// expensive (lag) and fragile during rotation (buttons flew into the comments
+// area / black bars). We now compute a FIXED position purely from our own
+// container's bounds -- no tree-walking, no cross-view coordinate conversion,
+// no caching, no orientation-specific anchoring. This is cheap enough to run
+// every pass and cannot misbehave during transitions because it only reads the
+// container's current size.
 static void ytlp_layoutOverlayButtons(id controlsView) {
     NSDictionary *overlayButtons = ytlp_getOverlayButtons(controlsView);
     if (!overlayButtons.count) return;
@@ -2437,193 +2423,33 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
         UIView *nextBtn  = overlayButtons[@"nextFromQueue"];
         UIView *anyBtn = queueBtn ?: nextBtn;
         UIView *sv = anyBtn.superview;
-        if (!sv || sv.bounds.size.width <= 100.0) return; // not laid out yet
+        if (!sv) return;
 
-        // IMPORTANT: position the buttons at a FIXED frame on EVERY layout pass,
-        // regardless of whether they're currently visible (alpha). The native
-        // YouTube buttons (gear/CC/Cast) keep a constant frame and only animate
-        // their alpha to fade in/out -- they never slide. By always maintaining
-        // the same frame here (and letting setTopOverlayVisible animate only
-        // alpha), our buttons fade in place exactly like the native ones rather
-        // than sliding in from wherever they happened to be.
-        CGFloat w = anyBtn.bounds.size.width > 0 ? anyBtn.bounds.size.width : 24.0;
-        CGFloat h = anyBtn.bounds.size.height > 0 ? anyBtn.bounds.size.height : 40.0;
         CGFloat svW = sv.bounds.size.width;
+        if (svW <= 100.0) return; // not laid out yet
 
-        // Determine orientation from the view's WINDOW, which reliably reflects
-        // the current interface orientation (UIScreen.bounds does not always
-        // rotate, which previously misfired the landscape path in portrait and
-        // broke portrait placement).
-        BOOL isLandscape = NO;
-        CGFloat winW = 0, winH = 0;
-        @try {
-            UIWindow *win = sv.window;
-            CGRect wb = win ? win.bounds : [UIScreen mainScreen].bounds;
-            winW = wb.size.width; winH = wb.size.height;
-            isLandscape = winW > winH;
-        } @catch (__unused NSException *e) {}
+        CGFloat w = anyBtn.bounds.size.width  > 0 ? anyBtn.bounds.size.width  : 24.0;
+        CGFloat h = anyBtn.bounds.size.height > 0 ? anyBtn.bounds.size.height : 40.0;
+        CGFloat gap = 12.0;
 
-        CGFloat gap = 10.0;
+        // Fixed placement: top band, offset in from the RIGHT edge of our own
+        // container. The two buttons sit side by side. Using the container's
+        // own width means this is correct in both portrait and landscape
+        // without any orientation detection -- YouTube sizes the container for
+        // whatever orientation is active, so reading svW is always right.
+        CGFloat topY = 12.0;
+        CGFloat rightInset = 12.0;
+        CGFloat totalW = (w * 2) + gap;
+        CGFloat x = svW - rightInset - totalW;
+        if (x < 8.0) x = 8.0; // never run off the left edge on tiny widths
 
-        // TRANSITION GUARD: during an orientation change, layoutSubviews fires
-        // many times while the view tree is half-rotated -- the window reports
-        // the new orientation but the player container hasn't caught up (or vice
-        // versa). Positioning off that inconsistent geometry is what threw our
-        // buttons into the comments area / black void mid-rotation. So we detect
-        // the inconsistency and, while it persists, HIDE our buttons and skip
-        // positioning entirely. They fade back in once geometry settles. This is
-        // the most stable behavior and also avoids running the scan on bad data.
-        //
-        // Find the widest ancestor (cheap pointer walk, no view scanning) and
-        // compare its aspect to the window's. If they disagree on orientation,
-        // we're mid-transition.
-        UIView *widest = sv;
-        {
-            UIView *cur = sv;
-            int h2 = 0;
-            while (cur && h2 < 8) {
-                if (cur.bounds.size.width > widest.bounds.size.width) widest = cur;
-                cur = cur.superview;
-                h2++;
-            }
+        if (queueBtn) {
+            queueBtn.frame = CGRectMake(x, topY, w, h);
+            x += w + gap;
         }
-        CGFloat aw = widest.bounds.size.width, ah = widest.bounds.size.height;
-        BOOL ancestorLandscape = aw > ah;
-        BOOL geometrySettled = (winW > 0 && ah > 0) && (ancestorLandscape == isLandscape);
-
-        if (!geometrySettled) {
-            // Mid-transition: hide and bail. Invalidate the cache so we do a
-            // fresh scan once settled.
-            ytlp_cacheValid = NO;
-            @try {
-                if (queueBtn) queueBtn.alpha = 0.0;
-                if (nextBtn)  nextBtn.alpha = 0.0;
-            } @catch (__unused NSException *e) {}
-            return;
+        if (nextBtn) {
+            nextBtn.frame = CGRectMake(x, topY, w, h);
         }
-
-        // CACHE CHECK: the anchor only changes meaningfully with ORIENTATION.
-        // We deliberately do NOT key on container width -- width jitters by
-        // sub-pixels during playback and sweeps through many values during a
-        // rotation animation, and keying on it caused the scan to re-run
-        // constantly (severe lag). Orientation-only keying means one scan per
-        // rotation, then pure cache hits.
-        BOOL cacheHit = ytlp_cacheValid && ytlp_cacheLandscape == isLandscape;
-
-        // Cheap perf accounting.
-        ytlp_layoutCalls++;
-        if (!cacheHit) ytlp_scanCalls++;
-        if ((ytlp_layoutCalls % 60) == 0) {
-            NSString *info = [NSString stringWithFormat:@"calls=%lu scans=%lu land=%d",
-                              ytlp_layoutCalls, ytlp_scanCalls, isLandscape ? 1 : 0];
-            [[NSUserDefaults standardUserDefaults] setObject:info forKey:@"ytlp_dbg_land"];
-        }
-
-        CGFloat nativeLeftXInWidest = ytlp_cacheAnchorX;
-        CGFloat nativeTopYInWidest = ytlp_cacheAnchorY;
-        CGFloat topYLocal = ytlp_cacheTopYLocal;
-
-        if (!cacheHit) {
-            // ---- EXPENSIVE PATH: recompute anchor (rarely) ----
-            // 'widest' was already found above (for the transition guard).
-            CGFloat screenW = widest.bounds.size.width;
-
-            // Find YouTube's native top-right controls (gear/CC/Cast/autoplay).
-            // The autoplay control is ALWAYS present, so we simply anchor to the
-            // LEFTMOST native control in the cluster and place our buttons just
-            // to its left. (Earlier logic tried to skip an autoplay "slot" that
-            // we now know never actually vanishes -- that mis-anchored our
-            // buttons under the autoplay control. Leftmost is correct + simple.)
-            nativeLeftXInWidest = -1;
-            nativeTopYInWidest = 0;
-            topYLocal = 12.0;
-            @try {
-                NSMutableArray<UIView *> *stack = [@[widest] mutableCopy];
-                int guard = 0;
-                while (stack.count && guard < 4000) {
-                    guard++;
-                    UIView *v = stack.lastObject; [stack removeLastObject];
-                    if (v == queueBtn || v == nextBtn) continue;
-                    CGRect fInWidest = [widest convertRect:v.bounds fromView:v];
-                    BOOL nearTop = fInWidest.origin.y >= 0 && fInWidest.origin.y < 140.0;
-                    BOOL onRight = fInWidest.origin.x > screenW * 0.6;
-                    BOOL smallish = fInWidest.size.width > 10 && fInWidest.size.width < 90.0
-                                  && fInWidest.size.height > 10 && fInWidest.size.height < 90.0;
-                    if (nearTop && onRight && smallish && !v.hidden && v.alpha > 0.01) {
-                        if (nativeLeftXInWidest < 0 || fInWidest.origin.x < nativeLeftXInWidest) {
-                            nativeLeftXInWidest = fInWidest.origin.x;
-                            nativeTopYInWidest = fInWidest.origin.y;
-                        }
-                    }
-                    for (UIView *c in v.subviews) [stack addObject:c];
-                }
-            } @catch (__unused NSException *e) {}
-
-            // Portrait y: sample a sibling native control if present.
-            for (UIView *child in sv.subviews) {
-                if (child == queueBtn || child == nextBtn) continue;
-                CGRect cf = child.frame;
-                if (cf.origin.y < 120.0 && cf.origin.y > 0 && cf.origin.x > svW * 0.5
-                    && cf.size.width > 0 && cf.size.width < 90.0 && cf.size.height < 90.0
-                    && !child.hidden) {
-                    topYLocal = cf.origin.y;
-                    break;
-                }
-            }
-
-            // Store cache (only if we actually found the cluster in landscape, or
-            // we're in portrait which doesn't need it). This avoids caching a bad
-            // miss during a transient layout where the cluster isn't up yet.
-            if (!isLandscape || nativeLeftXInWidest >= 0) {
-                ytlp_cacheValid = YES;
-                ytlp_cacheLandscape = isLandscape;
-                ytlp_cacheAnchorX = nativeLeftXInWidest;
-                ytlp_cacheAnchorY = nativeTopYInWidest;
-                ytlp_cacheTopYLocal = topYLocal;
-            }
-        }
-        // (On a cache hit, 'widest' is already computed up-front by the
-        // transition guard, so no recompute is needed here.)
-
-        if (isLandscape && nativeLeftXInWidest >= 0) {
-            // Place our buttons just LEFT of the stable native cluster. Compute
-            // target positions in the WIDEST view's coords, then convert into OUR
-            // container's coords so the on-screen position is right even though
-            // our buttons stay in their own container.
-            CGFloat landGap = 16.0;
-            CGFloat totalWidth = (w * 2) + landGap;
-            CGFloat startXWidest = nativeLeftXInWidest - landGap - totalWidth;
-            CGFloat yWidest = nativeTopYInWidest - 6.0; // align visible glyphs
-            @try {
-                if (queueBtn) {
-                    CGPoint pW = CGPointMake(startXWidest, yWidest);
-                    CGPoint pLocal = [sv convertPoint:pW fromView:widest];
-                    queueBtn.frame = CGRectMake(pLocal.x, pLocal.y, w, h);
-                }
-                if (nextBtn) {
-                    CGPoint pW = CGPointMake(startXWidest + w + landGap, yWidest);
-                    CGPoint pLocal = [sv convertPoint:pW fromView:widest];
-                    nextBtn.frame = CGRectMake(pLocal.x, pLocal.y, w, h);
-                }
-            } @catch (__unused NSException *e) {}
-        } else {
-            // Portrait (or native cluster not found): centered-ish top band.
-            CGFloat x = svW * 0.38;
-            if (queueBtn) {
-                queueBtn.frame = CGRectMake(x, topYLocal, w, h);
-                x += w + gap;
-            }
-            if (nextBtn) {
-                nextBtn.frame = CGRectMake(x, topYLocal, w, h);
-            }
-        }
-
-        // Geometry is settled and buttons are positioned: restore their intended
-        // visibility (the transition guard may have forced them to alpha 0).
-        @try {
-            if (queueBtn) queueBtn.alpha = ytlp_desiredAlpha;
-            if (nextBtn)  nextBtn.alpha = ytlp_desiredAlpha;
-        } @catch (__unused NSException *e) {}
     } @catch (__unused NSException *e) {}
 }
 
@@ -2640,17 +2466,12 @@ static void ytlp_setTopOverlayVisible(id self, SEL _cmd, BOOL visible, BOOL canc
     if (origSetTopOverlayVisible) origSetTopOverlayVisible(self, _cmd, visible, canceledState);
     
     CGFloat alpha = (canceledState || !visible) ? 0.0 : 1.0;
-    ytlp_desiredAlpha = alpha;
     
     NSDictionary *overlayButtons = ytlp_getOverlayButtons(self);
     if (overlayButtons) {
         for (UIView *button in [overlayButtons allValues]) {
             button.alpha = alpha;
         }
-        // On a fresh show, invalidate the position cache so the anchor is
-        // recomputed exactly once (covers any view-tree rebuild). Subsequent
-        // layout passes hit the cache and stay cheap.
-        if (visible && !canceledState) ytlp_cacheValid = NO;
         // Ensure the frame is correct (it's maintained every layout pass too).
         ytlp_layoutOverlayButtons(self);
     }

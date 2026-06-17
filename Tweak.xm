@@ -2427,56 +2427,108 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
         CGFloat w = anyBtn.bounds.size.width > 0 ? anyBtn.bounds.size.width : 24.0;
         CGFloat h = anyBtn.bounds.size.height > 0 ? anyBtn.bounds.size.height : 40.0;
         CGFloat svW = sv.bounds.size.width;
-        CGFloat svH = sv.bounds.size.height;
 
-        // Scan native top-right controls (gear/CC/Cast) to learn both their
-        // vertical position (topY) and the LEFTMOST x of that cluster, so in
-        // landscape we can sit just to its left.
-        CGFloat topY = 12.0;
-        CGFloat clusterLeftX = svW; // leftmost native right-side control x
+        // Determine orientation from the WIDEST ancestor (our immediate container
+        // is only ~204pt even in landscape, so svW alone can't tell us). Walk up
+        // to the widest view in the chain.
+        UIView *widest = sv;
+        UIView *cursor = sv;
+        int hops = 0;
+        while (cursor && hops < 8) {
+            if (cursor.bounds.size.width > widest.bounds.size.width) widest = cursor;
+            cursor = cursor.superview;
+            hops++;
+        }
+        CGFloat screenW = widest.bounds.size.width;
+        CGFloat screenH = widest.bounds.size.height;
+        BOOL isLandscape = screenW > screenH * 1.2;
+
+        // Find YouTube's native right-side cluster (gear/CC/Cast). It lives in the
+        // wide ancestor, NOT our small container -- so scan the widest view's
+        // subview tree for small controls near the top-right.
+        CGFloat topYLocal = 12.0;   // y in OUR container's coords (portrait path)
+        CGFloat nativeLeftXInWidest = -1; // leftmost native button x in widest coords
+        CGFloat nativeTopYInWidest = 0;
+        CGFloat nativeBtnW = w;
         int rightCount = 0;
-        CGFloat minRightX = svW, maxRightX = 0;
+        @try {
+            NSMutableArray<UIView *> *stack = [@[widest] mutableCopy];
+            int guard = 0;
+            while (stack.count && guard < 4000) {
+                guard++;
+                UIView *v = stack.lastObject; [stack removeLastObject];
+                if (v == queueBtn || v == nextBtn) continue;
+                CGRect fInWidest = [widest convertRect:v.bounds fromView:v];
+                BOOL nearTop = fInWidest.origin.y >= 0 && fInWidest.origin.y < 140.0;
+                BOOL onRight = fInWidest.origin.x > screenW * 0.6;
+                BOOL smallish = fInWidest.size.width > 10 && fInWidest.size.width < 90.0
+                              && fInWidest.size.height > 10 && fInWidest.size.height < 90.0;
+                if (nearTop && onRight && smallish && !v.hidden && v.alpha > 0.01) {
+                    if (nativeLeftXInWidest < 0 || fInWidest.origin.x < nativeLeftXInWidest) {
+                        nativeLeftXInWidest = fInWidest.origin.x;
+                        nativeTopYInWidest = fInWidest.origin.y;
+                        nativeBtnW = fInWidest.size.width;
+                    }
+                    rightCount++;
+                }
+                for (UIView *c in v.subviews) [stack addObject:c];
+            }
+        } @catch (__unused NSException *e) {}
+
+        // Portrait y: sample a sibling native control if present (existing path).
         for (UIView *child in sv.subviews) {
             if (child == queueBtn || child == nextBtn) continue;
             CGRect cf = child.frame;
-            BOOL nearTop = cf.origin.y < 120.0 && cf.origin.y > 0;
-            BOOL onRight = cf.origin.x > svW * 0.5;
-            BOOL smallish = cf.size.width > 0 && cf.size.width < 90.0 && cf.size.height < 90.0;
-            if (nearTop && onRight && smallish && !child.hidden) {
-                if (cf.origin.y > 0) topY = cf.origin.y;
-                if (cf.origin.x < clusterLeftX) clusterLeftX = cf.origin.x;
-                rightCount++;
-                if (cf.origin.x < minRightX) minRightX = cf.origin.x;
-                if (cf.origin.x > maxRightX) maxRightX = cf.origin.x;
+            if (cf.origin.y < 120.0 && cf.origin.y > 0 && cf.origin.x > svW * 0.5
+                && cf.size.width > 0 && cf.size.width < 90.0 && cf.size.height < 90.0
+                && !child.hidden) {
+                topYLocal = cf.origin.y;
+                break;
             }
         }
 
         CGFloat gap = 10.0;
-        BOOL isLandscape = svW > svH * 1.2;
 
-        // TEMP DIAGNOSTIC: in landscape, record what the scan found.
+        // TEMP DIAGNOSTIC.
         if (isLandscape) {
             NSString *info = [NSString stringWithFormat:
-                @"land svW=%.0f subv=%lu rc=%d clX=%.0f minX=%.0f maxX=%.0f",
-                svW, (unsigned long)sv.subviews.count, rightCount, clusterLeftX, minRightX, maxRightX];
+                @"land screenW=%.0f rc=%d natLX=%.0f natY=%.0f",
+                screenW, rightCount, nativeLeftXInWidest, nativeTopYInWidest];
             [[NSUserDefaults standardUserDefaults] setObject:info forKey:@"ytlp_dbg_land"];
         }
 
-        CGFloat x;
-        if (isLandscape && clusterLeftX < svW) {
-            // Two buttons + gaps sit immediately left of the native cluster.
+        if (isLandscape && nativeLeftXInWidest >= 0) {
+            // Place our buttons just LEFT of the native cluster. Compute target
+            // positions in the WIDEST view's coordinates, then convert each into
+            // OUR container's coordinate space so the on-screen position is right
+            // even though our buttons stay in their own container.
             CGFloat totalWidth = (w * 2) + gap;
-            x = clusterLeftX - gap - totalWidth;
-            if (x < svW * 0.2) x = svW * 0.2; // safety: don't run into center
+            CGFloat startXWidest = nativeLeftXInWidest - gap - totalWidth;
+            CGFloat yWidest = nativeTopYInWidest;
+            (void)nativeBtnW;
+            @try {
+                // Queue button
+                if (queueBtn) {
+                    CGPoint pW = CGPointMake(startXWidest, yWidest);
+                    CGPoint pLocal = [sv convertPoint:pW fromView:widest];
+                    queueBtn.frame = CGRectMake(pLocal.x, pLocal.y, w, h);
+                }
+                if (nextBtn) {
+                    CGPoint pW = CGPointMake(startXWidest + w + gap, yWidest);
+                    CGPoint pLocal = [sv convertPoint:pW fromView:widest];
+                    nextBtn.frame = CGRectMake(pLocal.x, pLocal.y, w, h);
+                }
+            } @catch (__unused NSException *e) {}
         } else {
-            x = svW * 0.38; // portrait: centered-ish top band
-        }
-        if (queueBtn) {
-            queueBtn.frame = CGRectMake(x, topY, w, h);
-            x += w + gap;
-        }
-        if (nextBtn) {
-            nextBtn.frame = CGRectMake(x, topY, w, h);
+            // Portrait (or native cluster not found): centered-ish top band.
+            CGFloat x = svW * 0.38;
+            if (queueBtn) {
+                queueBtn.frame = CGRectMake(x, topYLocal, w, h);
+                x += w + gap;
+            }
+            if (nextBtn) {
+                nextBtn.frame = CGRectMake(x, topYLocal, w, h);
+            }
         }
     } @catch (__unused NSException *e) {}
 }

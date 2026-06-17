@@ -108,7 +108,7 @@ static id ytlp_makeToggleRow(Class cls, NSString *label, NSString *defaultsKey, 
 }
 
 static const NSInteger YTLocalQueueSection = 931; // unique tweak section id
-static NSString *const kYTLPVersion = @"0.0.1+build23-TEST";
+static NSString *const kYTLPVersion = @"1.0.0";
 
 __attribute__((unused)) static BOOL YTLP_AutoAdvanceEnabled(void) {
     return [[NSUserDefaults standardUserDefaults] boolForKey:@"ytlp_queue_auto_advance_enabled"];
@@ -200,22 +200,6 @@ static NSArray *ytlp_buildSectionItems(void) {
             return YES;
         });
     if (clear) [items addObject:clear];
-
-    // ---- TEMP DIAGNOSTIC ROWS (build23-TEST) ----
-    // These read back what Tweak.xm/refresh discovered at runtime so we can
-    // debug button placement + toggle refresh without a Mac/Console. Tap a
-    // toggle, then re-open this screen to see updated values.
-    NSUserDefaults *dd = [NSUserDefaults standardUserDefaults];
-    NSArray *dbgKeys = @[@"ytlp_dbg_button", @"ytlp_dbg_button2", @"ytlp_dbg_array", @"ytlp_dbg_arraybtn", @"ytlp_dbg_toggle"];
-    for (NSString *k in dbgKeys) {
-        NSString *val = [dd objectForKey:k];
-        if (val.length > 0) {
-            id dbgRow = ytlp_makeSelectItem(SectionItemClass,
-                [NSString stringWithFormat:@"DBG %@", val],
-                ^BOOL(id cell, NSUInteger arg1) { return NO; });
-            if (dbgRow) [items addObject:dbgRow];
-        }
-    }
 
     // Version info (non-interactive)
     id versionItem = ytlp_makeSelectItem(SectionItemClass,
@@ -352,8 +336,6 @@ static void ytlp_refreshSettingsFromCell(id cell) {
     // Rebuild our section's items and push them into the VC, so its stored
     // section data reflects the new On/Off titles BEFORE we reload.
     NSArray *items = ytlp_buildSectionItems();
-    NSString *dbg = [NSString stringWithFormat:@"vc=%@; ",
-        vc ? NSStringFromClass([vc class]) : @"(nil)"];
 
     SEL selWithIcon = sel_getUid("setSectionItems:forCategory:title:icon:titleDescription:headerHidden:");
     SEL selNoIcon   = sel_getUid("setSectionItems:forCategory:title:titleDescription:headerHidden:");
@@ -375,17 +357,13 @@ static void ytlp_refreshSettingsFromCell(id cell) {
 
     // The VC's reloadData updates its data model, but the already-visible
     // collection view may not re-query until it next lays out. Force the
-    // collection view itself to reload too, and again on the next runloop tick
-    // (the tap is still being processed on this tick, so a deferred reload after
-    // the new section data is committed reliably redraws the row text).
-    BOOL cvReloaded = NO;
+    // collection view itself to reload too, and again on the next runloop tick.
     if (vc) {
         for (NSString *key in @[@"_collectionView", @"collectionView", @"_tableView", @"tableView"]) {
             @try {
                 id cv = [vc valueForKey:key];
                 if (cv && [cv respondsToSelector:reloadSel]) {
                     ((void (*)(id, SEL))objc_msgSend)(cv, reloadSel);
-                    cvReloaded = YES;
                     break;
                 }
             } @catch (__unused NSException *e) {}
@@ -402,9 +380,6 @@ static void ytlp_refreshSettingsFromCell(id cell) {
             } @catch (__unused NSException *e) {}
         });
     }
-
-    NSString *finalDbg = [NSString stringWithFormat:@"%@pushed=%d reloaded=%d cv=%d", dbg, pushed, reloaded, cvReloaded];
-    [[NSUserDefaults standardUserDefaults] setObject:finalDbg forKey:@"ytlp_dbg_toggle"];
 
     if (!pushed && !reloaded) {
         // Last resort: the manager-based path.

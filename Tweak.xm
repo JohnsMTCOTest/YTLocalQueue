@@ -2424,6 +2424,10 @@ static CGFloat ytlp_cacheTopYLocal = 12.0;
 // defaults only once every 60 calls to avoid per-frame cost.
 static unsigned long ytlp_layoutCalls = 0;
 static unsigned long ytlp_scanCalls = 0;
+// Tracks the alpha our buttons SHOULD have (driven by setTopOverlayVisible).
+// The transition guard temporarily forces alpha 0; once geometry settles we
+// restore this value so the buttons reappear in sync with the native controls.
+static CGFloat ytlp_desiredAlpha = 1.0;
 
 static void ytlp_layoutOverlayButtons(id controlsView) {
     NSDictionary *overlayButtons = ytlp_getOverlayButtons(controlsView);
@@ -2451,13 +2455,52 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
         // rotate, which previously misfired the landscape path in portrait and
         // broke portrait placement).
         BOOL isLandscape = NO;
+        CGFloat winW = 0, winH = 0;
         @try {
             UIWindow *win = sv.window;
             CGRect wb = win ? win.bounds : [UIScreen mainScreen].bounds;
-            isLandscape = wb.size.width > wb.size.height;
+            winW = wb.size.width; winH = wb.size.height;
+            isLandscape = winW > winH;
         } @catch (__unused NSException *e) {}
 
         CGFloat gap = 10.0;
+
+        // TRANSITION GUARD: during an orientation change, layoutSubviews fires
+        // many times while the view tree is half-rotated -- the window reports
+        // the new orientation but the player container hasn't caught up (or vice
+        // versa). Positioning off that inconsistent geometry is what threw our
+        // buttons into the comments area / black void mid-rotation. So we detect
+        // the inconsistency and, while it persists, HIDE our buttons and skip
+        // positioning entirely. They fade back in once geometry settles. This is
+        // the most stable behavior and also avoids running the scan on bad data.
+        //
+        // Find the widest ancestor (cheap pointer walk, no view scanning) and
+        // compare its aspect to the window's. If they disagree on orientation,
+        // we're mid-transition.
+        UIView *widest = sv;
+        {
+            UIView *cur = sv;
+            int h2 = 0;
+            while (cur && h2 < 8) {
+                if (cur.bounds.size.width > widest.bounds.size.width) widest = cur;
+                cur = cur.superview;
+                h2++;
+            }
+        }
+        CGFloat aw = widest.bounds.size.width, ah = widest.bounds.size.height;
+        BOOL ancestorLandscape = aw > ah;
+        BOOL geometrySettled = (winW > 0 && ah > 0) && (ancestorLandscape == isLandscape);
+
+        if (!geometrySettled) {
+            // Mid-transition: hide and bail. Invalidate the cache so we do a
+            // fresh scan once settled.
+            ytlp_cacheValid = NO;
+            @try {
+                if (queueBtn) queueBtn.alpha = 0.0;
+                if (nextBtn)  nextBtn.alpha = 0.0;
+            } @catch (__unused NSException *e) {}
+            return;
+        }
 
         // CACHE CHECK: the anchor only changes meaningfully with ORIENTATION.
         // We deliberately do NOT key on container width -- width jitters by
@@ -2479,19 +2522,10 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
         CGFloat nativeLeftXInWidest = ytlp_cacheAnchorX;
         CGFloat nativeTopYInWidest = ytlp_cacheAnchorY;
         CGFloat topYLocal = ytlp_cacheTopYLocal;
-        UIView *widest = sv;
 
         if (!cacheHit) {
             // ---- EXPENSIVE PATH: recompute anchor (rarely) ----
-            // Find the widest ancestor (the full-width overlay) for coordinate
-            // conversion of the native cluster in landscape.
-            UIView *cursor = sv;
-            int hops = 0;
-            while (cursor && hops < 8) {
-                if (cursor.bounds.size.width > widest.bounds.size.width) widest = cursor;
-                cursor = cursor.superview;
-                hops++;
-            }
+            // 'widest' was already found above (for the transition guard).
             CGFloat screenW = widest.bounds.size.width;
 
             // Find YouTube's native top-right controls (gear/CC/Cast/autoplay).
@@ -2547,18 +2581,9 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
                 ytlp_cacheAnchorY = nativeTopYInWidest;
                 ytlp_cacheTopYLocal = topYLocal;
             }
-        } else {
-            // ---- CHEAP PATH: cache hit. Still need 'widest' for coord convert. ----
-            if (isLandscape) {
-                UIView *cursor = sv;
-                int hops = 0;
-                while (cursor && hops < 8) {
-                    if (cursor.bounds.size.width > widest.bounds.size.width) widest = cursor;
-                    cursor = cursor.superview;
-                    hops++;
-                }
-            }
         }
+        // (On a cache hit, 'widest' is already computed up-front by the
+        // transition guard, so no recompute is needed here.)
 
         if (isLandscape && nativeLeftXInWidest >= 0) {
             // Place our buttons just LEFT of the stable native cluster. Compute
@@ -2592,6 +2617,13 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
                 nextBtn.frame = CGRectMake(x, topYLocal, w, h);
             }
         }
+
+        // Geometry is settled and buttons are positioned: restore their intended
+        // visibility (the transition guard may have forced them to alpha 0).
+        @try {
+            if (queueBtn) queueBtn.alpha = ytlp_desiredAlpha;
+            if (nextBtn)  nextBtn.alpha = ytlp_desiredAlpha;
+        } @catch (__unused NSException *e) {}
     } @catch (__unused NSException *e) {}
 }
 
@@ -2608,6 +2640,7 @@ static void ytlp_setTopOverlayVisible(id self, SEL _cmd, BOOL visible, BOOL canc
     if (origSetTopOverlayVisible) origSetTopOverlayVisible(self, _cmd, visible, canceledState);
     
     CGFloat alpha = (canceledState || !visible) ? 0.0 : 1.0;
+    ytlp_desiredAlpha = alpha;
     
     NSDictionary *overlayButtons = ytlp_getOverlayButtons(self);
     if (overlayButtons) {

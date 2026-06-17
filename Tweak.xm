@@ -2407,6 +2407,25 @@ static NSMutableArray *ytlp_topButtonControls(id self, SEL _cmd) {
 // Position our two buttons within the controls overlay. Called from BOTH
 // setTopOverlayVisible (initial show) AND layoutSubviews (every layout pass) so
 // YouTube's relayout can't override us -- we always run last.
+//
+// PERF: layoutSubviews fires many times per second. The native-cluster scan
+// (a BFS over the whole overlay tree) is far too expensive to run every pass --
+// doing so caused severe lag. So we CACHE the computed landscape anchor and only
+// re-run the scan when the orientation or container width actually changes
+// (cache key). On the common path we just set frames from cached values, which
+// is cheap.
+static BOOL   ytlp_cacheValid = NO;
+static BOOL   ytlp_cacheLandscape = NO;
+static CGFloat ytlp_cacheSvW = 0;       // container width the cache was computed at
+static CGFloat ytlp_cacheAnchorX = -1;  // nativeLeftXInWidest (widest coords)
+static CGFloat ytlp_cacheAnchorY = 0;   // nativeTopYInWidest (widest coords)
+static CGFloat ytlp_cacheTopYLocal = 12.0;
+// PERF DIAGNOSTIC (cheap): count total layout calls vs expensive scans. A
+// healthy ratio is almost all calls hitting the cache (few scans). Written to
+// defaults only once every 60 calls to avoid per-frame cost.
+static unsigned long ytlp_layoutCalls = 0;
+static unsigned long ytlp_scanCalls = 0;
+
 static void ytlp_layoutOverlayButtons(id controlsView) {
     NSDictionary *overlayButtons = ytlp_getOverlayButtons(controlsView);
     if (!overlayButtons.count) return;
@@ -2439,90 +2458,147 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
             isLandscape = wb.size.width > wb.size.height;
         } @catch (__unused NSException *e) {}
 
-        // Find the widest ancestor (the full-width overlay) for coordinate
-        // conversion of the native cluster in landscape.
-        UIView *widest = sv;
-        UIView *cursor = sv;
-        int hops = 0;
-        while (cursor && hops < 8) {
-            if (cursor.bounds.size.width > widest.bounds.size.width) widest = cursor;
-            cursor = cursor.superview;
-            hops++;
-        }
-        CGFloat screenW = widest.bounds.size.width;
-
-        // Find YouTube's native right-side cluster (gear/CC/Cast). It lives in the
-        // wide ancestor, NOT our small container -- so scan the widest view's
-        // subview tree for small controls near the top-right.
-        CGFloat topYLocal = 12.0;   // y in OUR container's coords (portrait path)
-        CGFloat nativeLeftXInWidest = -1; // leftmost native button x in widest coords
-        CGFloat nativeTopYInWidest = 0;
-        CGFloat nativeBtnW = w;
-        int rightCount = 0;
-        @try {
-            NSMutableArray<UIView *> *stack = [@[widest] mutableCopy];
-            int guard = 0;
-            while (stack.count && guard < 4000) {
-                guard++;
-                UIView *v = stack.lastObject; [stack removeLastObject];
-                if (v == queueBtn || v == nextBtn) continue;
-                CGRect fInWidest = [widest convertRect:v.bounds fromView:v];
-                BOOL nearTop = fInWidest.origin.y >= 0 && fInWidest.origin.y < 140.0;
-                BOOL onRight = fInWidest.origin.x > screenW * 0.6;
-                BOOL smallish = fInWidest.size.width > 10 && fInWidest.size.width < 90.0
-                              && fInWidest.size.height > 10 && fInWidest.size.height < 90.0;
-                if (nearTop && onRight && smallish && !v.hidden && v.alpha > 0.01) {
-                    if (nativeLeftXInWidest < 0 || fInWidest.origin.x < nativeLeftXInWidest) {
-                        nativeLeftXInWidest = fInWidest.origin.x;
-                        nativeTopYInWidest = fInWidest.origin.y;
-                        nativeBtnW = fInWidest.size.width;
-                    }
-                    rightCount++;
-                }
-                for (UIView *c in v.subviews) [stack addObject:c];
-            }
-        } @catch (__unused NSException *e) {}
-
-        // Portrait y: sample a sibling native control if present (existing path).
-        for (UIView *child in sv.subviews) {
-            if (child == queueBtn || child == nextBtn) continue;
-            CGRect cf = child.frame;
-            if (cf.origin.y < 120.0 && cf.origin.y > 0 && cf.origin.x > svW * 0.5
-                && cf.size.width > 0 && cf.size.width < 90.0 && cf.size.height < 90.0
-                && !child.hidden) {
-                topYLocal = cf.origin.y;
-                break;
-            }
-        }
-
         CGFloat gap = 10.0;
 
-        // TEMP DIAGNOSTIC (both orientations) to verify orientation detection.
-        @try {
-            UIWindow *win = sv.window;
-            CGRect wb = win ? win.bounds : CGRectZero;
-            NSString *info = [NSString stringWithFormat:
-                @"win=%.0fx%.0f land=%d rc=%d natLX=%.0f natY=%.0f",
-                wb.size.width, wb.size.height, isLandscape ? 1 : 0,
-                rightCount, nativeLeftXInWidest, nativeTopYInWidest];
+        // CACHE CHECK: re-run the expensive native-cluster scan only when the
+        // orientation or container width changed. Otherwise reuse cached anchor.
+        BOOL cacheHit = ytlp_cacheValid
+                     && ytlp_cacheLandscape == isLandscape
+                     && fabs(ytlp_cacheSvW - svW) < 1.0;
+
+        // Cheap perf accounting.
+        ytlp_layoutCalls++;
+        if (!cacheHit) ytlp_scanCalls++;
+        if ((ytlp_layoutCalls % 60) == 0) {
+            NSString *info = [NSString stringWithFormat:@"calls=%lu scans=%lu land=%d",
+                              ytlp_layoutCalls, ytlp_scanCalls, isLandscape ? 1 : 0];
             [[NSUserDefaults standardUserDefaults] setObject:info forKey:@"ytlp_dbg_land"];
-        } @catch (__unused NSException *e) {}
+        }
+
+        CGFloat nativeLeftXInWidest = ytlp_cacheAnchorX;
+        CGFloat nativeTopYInWidest = ytlp_cacheAnchorY;
+        CGFloat topYLocal = ytlp_cacheTopYLocal;
+        UIView *widest = sv;
+
+        if (!cacheHit) {
+            // ---- EXPENSIVE PATH: recompute anchor (rarely) ----
+            // Find the widest ancestor (the full-width overlay) for coordinate
+            // conversion of the native cluster in landscape.
+            UIView *cursor = sv;
+            int hops = 0;
+            while (cursor && hops < 8) {
+                if (cursor.bounds.size.width > widest.bounds.size.width) widest = cursor;
+                cursor = cursor.superview;
+                hops++;
+            }
+            CGFloat screenW = widest.bounds.size.width;
+
+            // Find YouTube's native right-side cluster (gear/CC/Cast/autoplay).
+            // We collect ALL of them, then derive a STABLE anchor: the left edge
+            // of the tight right-hand group (gear/CC/Cast), deliberately ignoring
+            // the autoplay/next toggle which sits slightly left of that group and
+            // comes/goes with queue state (its appearance/disappearance otherwise
+            // shifts our anchor and opens a gap).
+            nativeLeftXInWidest = -1;
+            nativeTopYInWidest = 0;
+            topYLocal = 12.0;
+            NSMutableArray<NSValue *> *nativeRects = [NSMutableArray array];
+            @try {
+                NSMutableArray<UIView *> *stack = [@[widest] mutableCopy];
+                int guard = 0;
+                while (stack.count && guard < 4000) {
+                    guard++;
+                    UIView *v = stack.lastObject; [stack removeLastObject];
+                    if (v == queueBtn || v == nextBtn) continue;
+                    CGRect fInWidest = [widest convertRect:v.bounds fromView:v];
+                    BOOL nearTop = fInWidest.origin.y >= 0 && fInWidest.origin.y < 140.0;
+                    BOOL onRight = fInWidest.origin.x > screenW * 0.6;
+                    BOOL smallish = fInWidest.size.width > 10 && fInWidest.size.width < 90.0
+                                  && fInWidest.size.height > 10 && fInWidest.size.height < 90.0;
+                    if (nearTop && onRight && smallish && !v.hidden && v.alpha > 0.01) {
+                        [nativeRects addObject:[NSValue valueWithCGRect:fInWidest]];
+                    }
+                    for (UIView *c in v.subviews) [stack addObject:c];
+                }
+            } @catch (__unused NSException *e) {}
+
+            // Derive the stable anchor: sort native rects right-to-left and walk
+            // leftward through the tight group, stopping at the first big gap
+            // (the autoplay slot). The left edge of the tight group is our anchor.
+            @try {
+                if (nativeRects.count) {
+                    [nativeRects sortUsingComparator:^NSComparisonResult(NSValue *a, NSValue *b) {
+                        CGFloat ax = [a CGRectValue].origin.x, bx = [b CGRectValue].origin.x;
+                        if (ax > bx) return NSOrderedAscending;
+                        if (ax < bx) return NSOrderedDescending;
+                        return NSOrderedSame;
+                    }];
+                    CGRect rightmost = [nativeRects[0] CGRectValue];
+                    CGFloat groupLeftX = rightmost.origin.x;
+                    CGFloat prevLeftX = rightmost.origin.x;
+                    CGFloat refW = rightmost.size.width > 0 ? rightmost.size.width : w;
+                    nativeTopYInWidest = rightmost.origin.y;
+                    CGFloat maxStep = refW * 2.2;
+                    for (NSUInteger i = 1; i < nativeRects.count; i++) {
+                        CGRect r = [nativeRects[i] CGRectValue];
+                        CGFloat stepDelta = prevLeftX - r.origin.x;
+                        if (stepDelta <= maxStep) {
+                            groupLeftX = r.origin.x;
+                            prevLeftX = r.origin.x;
+                        } else {
+                            break;
+                        }
+                    }
+                    nativeLeftXInWidest = groupLeftX;
+                }
+            } @catch (__unused NSException *e) {}
+
+            // Portrait y: sample a sibling native control if present.
+            for (UIView *child in sv.subviews) {
+                if (child == queueBtn || child == nextBtn) continue;
+                CGRect cf = child.frame;
+                if (cf.origin.y < 120.0 && cf.origin.y > 0 && cf.origin.x > svW * 0.5
+                    && cf.size.width > 0 && cf.size.width < 90.0 && cf.size.height < 90.0
+                    && !child.hidden) {
+                    topYLocal = cf.origin.y;
+                    break;
+                }
+            }
+
+            // Store cache (only if we actually found the cluster in landscape, or
+            // we're in portrait which doesn't need it). This avoids caching a bad
+            // miss during a transient layout where the cluster isn't up yet.
+            if (!isLandscape || nativeLeftXInWidest >= 0) {
+                ytlp_cacheValid = YES;
+                ytlp_cacheLandscape = isLandscape;
+                ytlp_cacheSvW = svW;
+                ytlp_cacheAnchorX = nativeLeftXInWidest;
+                ytlp_cacheAnchorY = nativeTopYInWidest;
+                ytlp_cacheTopYLocal = topYLocal;
+            }
+        } else {
+            // ---- CHEAP PATH: cache hit. Still need 'widest' for coord convert. ----
+            if (isLandscape) {
+                UIView *cursor = sv;
+                int hops = 0;
+                while (cursor && hops < 8) {
+                    if (cursor.bounds.size.width > widest.bounds.size.width) widest = cursor;
+                    cursor = cursor.superview;
+                    hops++;
+                }
+            }
+        }
 
         if (isLandscape && nativeLeftXInWidest >= 0) {
-            // Place our buttons just LEFT of the native cluster. Compute target
-            // positions in the WIDEST view's coordinates, then convert each into
-            // OUR container's coordinate space so the on-screen position is right
-            // even though our buttons stay in their own container.
-            CGFloat landGap = 16.0; // a touch more spacing between our two buttons
+            // Place our buttons just LEFT of the stable native cluster. Compute
+            // target positions in the WIDEST view's coords, then convert into OUR
+            // container's coords so the on-screen position is right even though
+            // our buttons stay in their own container.
+            CGFloat landGap = 16.0;
             CGFloat totalWidth = (w * 2) + landGap;
             CGFloat startXWidest = nativeLeftXInWidest - landGap - totalWidth;
-            // Nudge up a few points: our button's tappable frame is taller than
-            // the visible glyph, so matching the native frame-top sits slightly
-            // low. Shift up ~6pt to align the visible icons.
-            CGFloat yWidest = nativeTopYInWidest - 6.0;
-            (void)nativeBtnW;
+            CGFloat yWidest = nativeTopYInWidest - 6.0; // align visible glyphs
             @try {
-                // Queue button
                 if (queueBtn) {
                     CGPoint pW = CGPointMake(startXWidest, yWidest);
                     CGPoint pLocal = [sv convertPoint:pW fromView:widest];
@@ -2567,6 +2643,10 @@ static void ytlp_setTopOverlayVisible(id self, SEL _cmd, BOOL visible, BOOL canc
         for (UIView *button in [overlayButtons allValues]) {
             button.alpha = alpha;
         }
+        // On a fresh show, invalidate the position cache so the anchor is
+        // recomputed exactly once (covers any view-tree rebuild). Subsequent
+        // layout passes hit the cache and stay cheap.
+        if (visible && !canceledState) ytlp_cacheValid = NO;
         // Ensure the frame is correct (it's maintained every layout pass too).
         ytlp_layoutOverlayButtons(self);
     }

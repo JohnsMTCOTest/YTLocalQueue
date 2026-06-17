@@ -299,49 +299,56 @@ static void ytlp_refreshSettings(void) {
     }
 }
 
-// Reload by locating the settings view controller from the tapped cell's
-// responder chain. This does not depend on the captured (weak) manager ref, so
-// it works even if that reference is stale. Falls back to ytlp_refreshSettings.
+// Reload the settings list after a toggle changes. KEY INSIGHT (from on-device
+// diagnostics): the object passed into the select block is the
+// YTAsyncCollectionView, and calling -reloadData on THAT just redraws cached
+// cells with stale titles. We must instead push freshly-built section items
+// into the YTSettingsViewController (via setSectionItems:forCategory:...) and
+// then reload it -- that is what actually updates the visible row text.
 static void ytlp_refreshSettingsFromCell(id cell) {
-    // First, rebuild our section's item data via the manager (if we have it),
-    // so the On/Off titles are current before the reload.
+    (void)cell; // no longer used for the reload target; kept for compatibility
+
     id mgr = gYTLPSettingsManager;
-    if (mgr) {
-        SEL upd = sel_getUid("updateSectionForCategory:withEntry:");
-        if ([mgr respondsToSelector:upd]) {
-            ((void (*)(id, SEL, NSUInteger, id))objc_msgSend)(mgr, upd, (NSUInteger)YTLocalQueueSection, nil);
-        }
+    if (!mgr) { ytlp_refreshSettings(); return; }
+
+    // Find the real settings view controller (NOT the collection view).
+    id vc = nil;
+    @try { vc = [mgr valueForKey:@"_settingsViewControllerDelegate"]; } @catch (__unused NSException *e) {}
+    if (!vc) {
+        @try { vc = [mgr valueForKey:@"_dataDelegate"]; } @catch (__unused NSException *e) {}
+    }
+
+    // Rebuild our section's items and push them into the VC, so its stored
+    // section data reflects the new On/Off titles BEFORE we reload.
+    NSArray *items = ytlp_buildSectionItems();
+    NSString *dbg = [NSString stringWithFormat:@"vc=%@; ",
+        vc ? NSStringFromClass([vc class]) : @"(nil)"];
+
+    SEL selWithIcon = sel_getUid("setSectionItems:forCategory:title:icon:titleDescription:headerHidden:");
+    SEL selNoIcon   = sel_getUid("setSectionItems:forCategory:title:titleDescription:headerHidden:");
+    BOOL pushed = NO;
+    if (vc && [vc respondsToSelector:selWithIcon]) {
+        ((void (*)(id, SEL, id, NSUInteger, id, id, id, BOOL))objc_msgSend)(vc, selWithIcon, items, (NSUInteger)YTLocalQueueSection, @"Local Queue", nil, nil, NO);
+        pushed = YES;
+    } else if (vc && [vc respondsToSelector:selNoIcon]) {
+        ((void (*)(id, SEL, id, NSUInteger, id, id, BOOL))objc_msgSend)(vc, selNoIcon, items, (NSUInteger)YTLocalQueueSection, @"Local Queue", nil, NO);
+        pushed = YES;
     }
 
     SEL reloadSel = sel_getUid("reloadData");
-
-    // Walk up the responder chain from the cell to find a view controller that
-    // responds to reloadData (the YTSettingsViewController).
-    UIResponder *r = [cell isKindOfClass:[UIResponder class]] ? (UIResponder *)cell : nil;
-    // TEMP DIAGNOSTIC: record the cell class and what the walk finds.
-    NSMutableString *dbg = [NSMutableString stringWithFormat:@"cell=%@; ",
-        cell ? NSStringFromClass([cell class]) : @"(nil)"];
-    int hops = 0;
-    UIResponder *found = nil;
-    while (r && hops < 30) {
-        if ([r respondsToSelector:reloadSel]) {
-            found = r;
-            break;
-        }
-        r = r.nextResponder;
-        hops++;
+    BOOL reloaded = NO;
+    if (vc && [vc respondsToSelector:reloadSel]) {
+        ((void (*)(id, SEL))objc_msgSend)(vc, reloadSel);
+        reloaded = YES;
     }
-    if (found) {
-        [dbg appendFormat:@"reloadData on %@ (hop %d)", NSStringFromClass([found class]), hops];
-        [[NSUserDefaults standardUserDefaults] setObject:dbg forKey:@"ytlp_dbg_toggle"];
-        ((void (*)(id, SEL))objc_msgSend)(found, reloadSel);
-        return;
-    }
-    [dbg appendFormat:@"no reloadData responder in %d hops", hops];
-    [[NSUserDefaults standardUserDefaults] setObject:dbg forKey:@"ytlp_dbg_toggle"];
 
-    // Fallback: the manager-based path.
-    ytlp_refreshSettings();
+    NSString *finalDbg = [NSString stringWithFormat:@"%@pushed=%d reloaded=%d", dbg, pushed, reloaded];
+    [[NSUserDefaults standardUserDefaults] setObject:finalDbg forKey:@"ytlp_dbg_toggle"];
+
+    if (!pushed && !reloaded) {
+        // Last resort: the manager-based path.
+        ytlp_refreshSettings();
+    }
 }
 
 __attribute__((constructor)) static void YTLP_InstallSettingsHooks(void) {

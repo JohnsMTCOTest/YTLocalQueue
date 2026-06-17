@@ -2428,39 +2428,51 @@ static void ytlp_setTopOverlayVisible(id self, SEL _cmd, BOOL visible, BOOL canc
         for (UIView *button in [overlayButtons allValues]) {
             button.alpha = alpha;
         }
-        // ---- Reposition buttons (build23-TEST): we learned from on-device
-        // diagnostics that the buttons live in YTMainAppControlsOverlayView with
-        // a plain frame at the far right (x~356 in a ~440-wide bounds), which is
-        // why they overlapped Cast/CC. Move them LEFT of that cluster. The
-        // superview uses plain frames (not Auto Layout), so setting .frame here
-        // -- after YouTube's own layout in the orig call above -- sticks.
+        // ---- Reposition buttons (build23-TEST): place our buttons in the OPEN
+        // band along the top, left of the center pause control and aligned with
+        // the native top button row (same y). This area is empty, so there's no
+        // cluster to collide with. We anchor proportionally to the player width
+        // so it holds across different sizes, and match the native button y by
+        // sampling a native top-row control when we can find one.
         if (alpha > 0.0) {
             @try {
                 UIView *queueBtn = overlayButtons[@"showQueue"];
                 UIView *nextBtn  = overlayButtons[@"nextFromQueue"];
                 UIView *anyBtn = queueBtn ?: nextBtn;
                 UIView *sv = anyBtn.superview;
-                if (sv) {
+                // Guard: skip until the superview is actually laid out.
+                if (sv && sv.bounds.size.width > 100.0) {
                     CGFloat w = anyBtn.bounds.size.width > 0 ? anyBtn.bounds.size.width : 24.0;
                     CGFloat h = anyBtn.bounds.size.height > 0 ? anyBtn.bounds.size.height : 40.0;
-                    CGFloat y = anyBtn.frame.origin.y > 0 ? anyBtn.frame.origin.y : 12.0;
-                    CGFloat gap = 8.0;
-                    // Place to the LEFT of the right-edge cluster. Diagnostics
-                    // showed the native cluster (autoplay/Cast/CC) is wider than
-                    // first estimated -- at offset 100 the buttons (x=284) still
-                    // sat under Cast/CC. Move further left to clear it. We anchor
-                    // relative to the right edge and lay our two buttons out
-                    // leftward from there.
-                    CGFloat rightAnchor = sv.bounds.size.width - 180.0;
-                    CGFloat x = rightAnchor;
-                    if (nextBtn) {
-                        x -= w;
-                        nextBtn.frame = CGRectMake(x, y, w, h);
-                        x -= gap;
+                    CGFloat svW = sv.bounds.size.width;
+
+                    // Match the native top buttons' vertical position: sample the
+                    // y of a native top-right control if present, else default 12.
+                    CGFloat topY = 12.0;
+                    for (UIView *child in sv.subviews) {
+                        if (child == queueBtn || child == nextBtn) continue;
+                        CGRect cf = child.frame;
+                        BOOL nearTop = cf.origin.y < 80.0 && cf.origin.y > 0;
+                        BOOL onRight = cf.origin.x > svW * 0.55;
+                        BOOL smallish = cf.size.width > 0 && cf.size.width < 80.0 && cf.size.height < 80.0;
+                        if (nearTop && onRight && smallish && !child.hidden && child.alpha > 0.01) {
+                            topY = cf.origin.y;
+                            break;
+                        }
                     }
+
+                    // Open top band: start at ~13% of the width (just right of the
+                    // collapse chevron) and lay the two buttons out rightward.
+                    // This keeps them well left of the center pause control and
+                    // clear of the right-side cluster.
+                    CGFloat gap = 10.0;
+                    CGFloat x = svW * 0.13;
                     if (queueBtn) {
-                        x -= w;
-                        queueBtn.frame = CGRectMake(x, y, w, h);
+                        queueBtn.frame = CGRectMake(x, topY, w, h);
+                        x += w + gap;
+                    }
+                    if (nextBtn) {
+                        nextBtn.frame = CGRectMake(x, topY, w, h);
                     }
                 }
             } @catch (__unused NSException *e) {}

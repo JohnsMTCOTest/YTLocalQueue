@@ -27,8 +27,8 @@ update-build-number:
 	@BUILD_NUMBER=$$(($$(grep BUILD_NUMBER $(BUILD_NUMBER_FILE) | cut -d' ' -f3 || echo 0) + 1)); \
 	echo "BUILD_NUMBER := $$BUILD_NUMBER" > $(BUILD_NUMBER_FILE); \
 	echo "Build number: $$BUILD_NUMBER"; \
-	sed -i '' "s/^Version: .*/Version: $(BASE_VERSION)+build$$BUILD_NUMBER/" control; \
-	sed -i '' "s/static NSString \*const kYTLPVersion = @\"[^\"]*\";/static NSString *const kYTLPVersion = @\"$(BASE_VERSION)+build$$BUILD_NUMBER\";/" Settings.xm
+	sed -i "s/^Version: .*/Version: $(BASE_VERSION)+build$$BUILD_NUMBER/" control; \
+	sed -i "s/static NSString \*const kYTLPVersion = @\"[^\"]*\";/static NSString *const kYTLPVersion = @\"$(BASE_VERSION)+build$$BUILD_NUMBER\";/" Settings.xm
 
 # Build a single dlopen-friendly dylib (no Substrate), containing both settings and tweak logic
 LIBRARY_NAME := YTLocalQueue
@@ -72,5 +72,3 @@ copy-to-sideload:
 			echo "Warning: Sideload directory does not exist: $$(dirname "$$SIDELOAD_DIR")"; \
 		fi; \
 	fi
-
-

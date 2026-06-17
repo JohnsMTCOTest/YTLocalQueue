@@ -34,25 +34,8 @@
 // real methods (correct arm64e ABI -> no toggle crash either).
 
 // Typed block aliases used by the casts below.
-typedef BOOL (^YTLPSwitchBlock)(id cell, BOOL enabled);
 typedef BOOL (^YTLPSelectBlock)(id cell, NSUInteger arg);
 typedef NSString * (^YTLPDetailBlock)(void);
-
-// Build a switch item by sending switchItemWithTitle:... to the runtime class.
-static id ytlp_makeSwitchItem(Class cls, NSString *title, NSString *desc,
-                              BOOL on, YTLPSwitchBlock block) {
-    SEL sel = @selector(switchItemWithTitle:titleDescription:accessibilityIdentifier:switchOn:switchBlock:settingItemId:);
-    if (![cls respondsToSelector:sel]) return nil;
-    // CRASH FIX: copy the block to the heap. The caller passes a stack block;
-    // the switch item stores it and YouTube invokes it LATER (when you toggle).
-    // By then the original stack frame is gone, so an un-copied stack block is a
-    // dangling pointer -> objc_retain on a garbage address (0x8004...) the moment
-    // the switch fires. Heap-copying makes the block outlive this frame.
-    YTLPSwitchBlock heapBlock = [block copy];
-    id (*send)(Class, SEL, NSString *, NSString *, NSString *, BOOL, YTLPSwitchBlock, NSInteger) =
-        (id (*)(Class, SEL, NSString *, NSString *, NSString *, BOOL, YTLPSwitchBlock, NSInteger))objc_msgSend;
-    return send(cls, sel, title, desc, nil, on, heapBlock, 0);
-}
 
 // Build a plain (tappable) item by sending itemWithTitle:... to the runtime class.
 static id ytlp_makeSelectItem(Class cls, NSString *title, YTLPSelectBlock block) {
@@ -66,14 +49,42 @@ static id ytlp_makeSelectItem(Class cls, NSString *title, YTLPSelectBlock block)
     return send(cls, sel, title, nil, nil, (YTLPDetailBlock)nil, heapBlock);
 }
 
+// Forward decls used by the tap-to-toggle helper.
+static void ytlp_refreshSettings(void);
+
+// Build a tap-to-toggle row. This deliberately AVOIDS the switchItem:...switchBlock:
+// path. Disassembly of the crashing build showed the BOOL argument that sits
+// immediately before the switchBlock gets miscompiled on arm64e (the runtime
+// retains the BOOL as if it were an object -> objc_retain on a garbage 0x8004...
+// address the moment the switch fires). The itemWithTitle:...selectBlock: path
+// has no such BOOL-before-block shape and is already proven to work for the
+// other rows, so we use it here. The row's title shows the current On/Off state
+// and tapping it flips the stored default and refreshes the screen.
+static id ytlp_makeToggleRow(Class cls, NSString *label, NSString *defaultsKey, BOOL defaultValue) {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    BOOL current = ([defaults objectForKey:defaultsKey] == nil)
+        ? defaultValue
+        : [defaults boolForKey:defaultsKey];
+    NSString *title = [NSString stringWithFormat:@"%@: %@", label, current ? @"On" : @"Off"];
+
+    NSString *keyCopy = [defaultsKey copy];
+    return ytlp_makeSelectItem(cls, title, ^BOOL(id cell, NSUInteger arg1) {
+        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+        BOOL now = [d boolForKey:keyCopy];
+        [d setBool:!now forKey:keyCopy];
+        ytlp_refreshSettings();
+        return YES;
+    });
+}
+
 static const NSInteger YTLocalQueueSection = 931; // unique tweak section id
 static NSString *const kYTLPVersion = @"0.0.1+build22";
 
-static BOOL YTLP_AutoAdvanceEnabled(void) {
+__attribute__((unused)) static BOOL YTLP_AutoAdvanceEnabled(void) {
     return [[NSUserDefaults standardUserDefaults] boolForKey:@"ytlp_queue_auto_advance_enabled"];
 }
 
-static BOOL YTLP_ShowPlayNextButton(void) {
+__attribute__((unused)) static BOOL YTLP_ShowPlayNextButton(void) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     if ([defaults objectForKey:@"ytlp_show_play_next_button"] == nil) {
         return YES; // Default: on
@@ -81,7 +92,7 @@ static BOOL YTLP_ShowPlayNextButton(void) {
     return [defaults boolForKey:@"ytlp_show_play_next_button"];
 }
 
-static BOOL YTLP_ShowQueueButton(void) {
+__attribute__((unused)) static BOOL YTLP_ShowQueueButton(void) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     if ([defaults objectForKey:@"ytlp_show_queue_button"] == nil) {
         return YES; // Default: on
@@ -108,37 +119,19 @@ static NSArray *ytlp_buildSectionItems(void) {
     Class SectionItemClass = objc_getClass("YTSettingsSectionItem");
     if (!SectionItemClass) return items;
 
-    // Auto advance toggle
-    id enableAuto = ytlp_makeSwitchItem(SectionItemClass,
-        @"Auto advance",
-        @"Automatically play next item from local queue when video ends",
-        YTLP_AutoAdvanceEnabled(),
-        ^BOOL(id cell, BOOL enabled) {
-            [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"ytlp_queue_auto_advance_enabled"];
-            return YES;
-        });
+    // Auto advance (tap-to-toggle row, not a switch â see ytlp_makeToggleRow)
+    id enableAuto = ytlp_makeToggleRow(SectionItemClass,
+        @"Auto advance", @"ytlp_queue_auto_advance_enabled", NO);
     if (enableAuto) [items addObject:enableAuto];
 
-    // Show Play Next button toggle
-    id showPlayNext = ytlp_makeSwitchItem(SectionItemClass,
-        @"Show Play Next button",
-        @"Show the Play Next button in the video player overlay",
-        YTLP_ShowPlayNextButton(),
-        ^BOOL(id cell, BOOL enabled) {
-            [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"ytlp_show_play_next_button"];
-            return YES;
-        });
+    // Show Play Next button (tap-to-toggle row)
+    id showPlayNext = ytlp_makeToggleRow(SectionItemClass,
+        @"Show Play Next button", @"ytlp_show_play_next_button", YES);
     if (showPlayNext) [items addObject:showPlayNext];
 
-    // Show Queue button toggle
-    id showQueue = ytlp_makeSwitchItem(SectionItemClass,
-        @"Show Queue button",
-        @"Show the Queue button in the video player overlay",
-        YTLP_ShowQueueButton(),
-        ^BOOL(id cell, BOOL enabled) {
-            [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"ytlp_show_queue_button"];
-            return YES;
-        });
+    // Show Queue button (tap-to-toggle row)
+    id showQueue = ytlp_makeToggleRow(SectionItemClass,
+        @"Show Queue button", @"ytlp_show_queue_button", YES);
     if (showQueue) [items addObject:showQueue];
 
     // Open Local Queue
@@ -232,8 +225,12 @@ static NSMutableArray* ytlp_tweaksList(id cls, SEL _cmd) {
     return arr;
 }
 
+// Weak handle to the live settings manager so a tap can refresh the rows.
+static __weak id gYTLPSettingsManager = nil;
+
 static void ytlp_updateSection(id self, SEL _cmd, NSUInteger category, id entry) {
     if (category == (NSUInteger)YTLocalQueueSection) {
+        gYTLPSettingsManager = self; // remember for refreshes
         id delegate = nil;
         @try { delegate = [self valueForKey:@"_dataDelegate"]; } @catch (__unused NSException *e) {}
         NSArray *items = ytlp_buildSectionItems();
@@ -247,6 +244,18 @@ static void ytlp_updateSection(id self, SEL _cmd, NSUInteger category, id entry)
         return;
     }
     if (origUpdateSection) origUpdateSection(self, _cmd, category, entry);
+}
+
+// Rebuild our settings section so the On/Off row titles reflect the new state.
+static void ytlp_refreshSettings(void) {
+    id mgr = gYTLPSettingsManager;
+    if (!mgr) return;
+    SEL sel = sel_getUid("updateSectionForCategory:withEntry:");
+    if ([mgr respondsToSelector:sel]) {
+        // Re-enter our own hook (origUpdateSection was swizzled in); this calls
+        // ytlp_updateSection for our category and rebuilds the rows.
+        ((void (*)(id, SEL, NSUInteger, id))objc_msgSend)(mgr, sel, (NSUInteger)YTLocalQueueSection, nil);
+    }
 }
 
 __attribute__((constructor)) static void YTLP_InstallSettingsHooks(void) {

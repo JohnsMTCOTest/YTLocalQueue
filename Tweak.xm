@@ -2434,23 +2434,34 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
         // landscape we can sit just to its left.
         CGFloat topY = 12.0;
         CGFloat clusterLeftX = svW; // leftmost native right-side control x
+        int rightCount = 0;
+        CGFloat minRightX = svW, maxRightX = 0;
         for (UIView *child in sv.subviews) {
             if (child == queueBtn || child == nextBtn) continue;
             CGRect cf = child.frame;
-            BOOL nearTop = cf.origin.y < 80.0 && cf.origin.y > 0;
-            BOOL onRight = cf.origin.x > svW * 0.55;
-            BOOL smallish = cf.size.width > 0 && cf.size.width < 80.0 && cf.size.height < 80.0;
+            BOOL nearTop = cf.origin.y < 120.0 && cf.origin.y > 0;
+            BOOL onRight = cf.origin.x > svW * 0.5;
+            BOOL smallish = cf.size.width > 0 && cf.size.width < 90.0 && cf.size.height < 90.0;
             if (nearTop && onRight && smallish && !child.hidden) {
                 if (cf.origin.y > 0) topY = cf.origin.y;
                 if (cf.origin.x < clusterLeftX) clusterLeftX = cf.origin.x;
+                rightCount++;
+                if (cf.origin.x < minRightX) minRightX = cf.origin.x;
+                if (cf.origin.x > maxRightX) maxRightX = cf.origin.x;
             }
         }
 
         CGFloat gap = 10.0;
-        // Landscape (wide) vs portrait: in landscape, place our buttons just to
-        // the LEFT of the native right-side cluster so they read as part of that
-        // group. In portrait, keep the centered top spot (which looks great).
         BOOL isLandscape = svW > svH * 1.2;
+
+        // TEMP DIAGNOSTIC: in landscape, record what the scan found.
+        if (isLandscape) {
+            NSString *info = [NSString stringWithFormat:
+                @"land svW=%.0f subv=%lu rc=%d clX=%.0f minX=%.0f maxX=%.0f",
+                svW, (unsigned long)sv.subviews.count, rightCount, clusterLeftX, minRightX, maxRightX];
+            [[NSUserDefaults standardUserDefaults] setObject:info forKey:@"ytlp_dbg_land"];
+        }
+
         CGFloat x;
         if (isLandscape && clusterLeftX < svW) {
             // Two buttons + gaps sit immediately left of the native cluster.

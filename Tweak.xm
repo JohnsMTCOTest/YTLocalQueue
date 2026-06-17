@@ -2389,37 +2389,19 @@ static void ytlp_createOverlayButtons(id controls, id target) {
     } @catch (__unused NSException *e) {}
 }
 
-// Hook topControls/topButtonControls to insert our buttons into the controls array
+// NOTE: We intentionally DO NOT add our buttons to topControls/topButtonControls.
+// YouTube's control row has a fixed layout budget; injecting extra buttons into
+// that array causes YouTube to drop native controls (gear/settings, CC, etc.) to
+// make room -- which broke playback-speed/CC/quality access, badly in landscape.
+// Our buttons render as manual subviews positioned by ytlp_layoutOverlayButtons
+// (called from layoutSubviews), so they don't need to be in the array at all.
+// These hooks now pass the native array through untouched.
 static NSMutableArray *ytlp_topControls(id self, SEL _cmd) {
-    NSMutableArray *controls = origTopControls ? origTopControls(self, _cmd) : [NSMutableArray array];
-
-    NSDictionary *overlayButtons = ytlp_getOverlayButtons(self);
-    if (overlayButtons) {
-        id nextBtn = overlayButtons[@"nextFromQueue"];
-        id queueBtn = overlayButtons[@"showQueue"];
-        // Append our buttons to the END of the controls array so they join the
-        // right-side utility cluster (Cast / CC / gear) instead of being jammed
-        // into the top-left next to the collapse chevron. Order: Queue then Next.
-        if (queueBtn && YTLP_ShowQueueButton()) [controls addObject:queueBtn];
-        if (nextBtn && YTLP_ShowPlayNextButton()) [controls addObject:nextBtn];
-    }
-
-    return controls;
+    return origTopControls ? origTopControls(self, _cmd) : [NSMutableArray array];
 }
 
 static NSMutableArray *ytlp_topButtonControls(id self, SEL _cmd) {
-    NSMutableArray *controls = origTopButtonControls ? origTopButtonControls(self, _cmd) : [NSMutableArray array];
-
-    NSDictionary *overlayButtons = ytlp_getOverlayButtons(self);
-    if (overlayButtons) {
-        id nextBtn = overlayButtons[@"nextFromQueue"];
-        id queueBtn = overlayButtons[@"showQueue"];
-        // Right-side placement (see note in ytlp_topControls).
-        if (queueBtn && YTLP_ShowQueueButton()) [controls addObject:queueBtn];
-        if (nextBtn && YTLP_ShowPlayNextButton()) [controls addObject:nextBtn];
-    }
-
-    return controls;
+    return origTopButtonControls ? origTopButtonControls(self, _cmd) : [NSMutableArray array];
 }
 
 // Position our two buttons within the controls overlay. Called from BOTH
@@ -2434,9 +2416,14 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
         UIView *anyBtn = queueBtn ?: nextBtn;
         UIView *sv = anyBtn.superview;
         if (!sv || sv.bounds.size.width <= 100.0) return; // not laid out yet
-        // Only position while our buttons are meant to be visible.
-        if (anyBtn.alpha <= 0.01) return;
 
+        // IMPORTANT: position the buttons at a FIXED frame on EVERY layout pass,
+        // regardless of whether they're currently visible (alpha). The native
+        // YouTube buttons (gear/CC/Cast) keep a constant frame and only animate
+        // their alpha to fade in/out -- they never slide. By always maintaining
+        // the same frame here (and letting setTopOverlayVisible animate only
+        // alpha), our buttons fade in place exactly like the native ones rather
+        // than sliding in from wherever they happened to be.
         CGFloat w = anyBtn.bounds.size.width > 0 ? anyBtn.bounds.size.width : 24.0;
         CGFloat h = anyBtn.bounds.size.height > 0 ? anyBtn.bounds.size.height : 40.0;
         CGFloat svW = sv.bounds.size.width;
@@ -2449,16 +2436,13 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
             BOOL nearTop = cf.origin.y < 80.0 && cf.origin.y > 0;
             BOOL onRight = cf.origin.x > svW * 0.55;
             BOOL smallish = cf.size.width > 0 && cf.size.width < 80.0 && cf.size.height < 80.0;
-            if (nearTop && onRight && smallish && !child.hidden && child.alpha > 0.01) {
+            if (nearTop && onRight && smallish && !child.hidden) {
                 topY = cf.origin.y;
                 break;
             }
         }
 
-        // Centered-ish top band: start a bit left of the horizontal middle so
-        // the two buttons read as central along the TOP row (y~12) while staying
-        // clear of the big center play/pause control (which sits lower, mid
-        // height) and the right-side cluster. Two buttons (~24pt) + 10pt gap.
+        // Centered-ish top band, left of the big center play control.
         CGFloat gap = 10.0;
         CGFloat x = svW * 0.38;
         if (queueBtn) {
@@ -2477,7 +2461,9 @@ static void ytlp_controlsLayoutSubviews(id self, SEL _cmd) {
     ytlp_layoutOverlayButtons(self);
 }
 
-// Hook setTopOverlayVisible to control button visibility (alpha)
+// Hook setTopOverlayVisible to control button visibility. We ONLY change alpha
+// here (matching native fade behavior); the frame is maintained in layoutSubviews
+// so the buttons fade in place rather than sliding.
 static void ytlp_setTopOverlayVisible(id self, SEL _cmd, BOOL visible, BOOL canceledState) {
     if (origSetTopOverlayVisible) origSetTopOverlayVisible(self, _cmd, visible, canceledState);
     
@@ -2488,9 +2474,8 @@ static void ytlp_setTopOverlayVisible(id self, SEL _cmd, BOOL visible, BOOL canc
         for (UIView *button in [overlayButtons allValues]) {
             button.alpha = alpha;
         }
-        if (alpha > 0.0) {
-            ytlp_layoutOverlayButtons(self);
-        }
+        // Ensure the frame is correct (it's maintained every layout pass too).
+        ytlp_layoutOverlayButtons(self);
     }
 }
 

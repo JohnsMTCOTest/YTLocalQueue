@@ -247,41 +247,45 @@ static void ytlp_updateSection(id self, SEL _cmd, NSUInteger category, id entry)
 }
 
 // Rebuild our settings section so the On/Off row titles reflect the new state,
-// then ask the settings UI to reload so the change is visible immediately.
+// then reload the settings view so the change is visible immediately.
 static void ytlp_refreshSettings(void) {
     id mgr = gYTLPSettingsManager;
     if (!mgr) return;
-    SEL sel = sel_getUid("updateSectionForCategory:withEntry:");
-    if ([mgr respondsToSelector:sel]) {
-        // Re-enter our own hook (origUpdateSection was swizzled in); this calls
-        // ytlp_updateSection for our category and rebuilds the rows' data.
-        ((void (*)(id, SEL, NSUInteger, id))objc_msgSend)(mgr, sel, (NSUInteger)YTLocalQueueSection, nil);
+
+    // The settings view controller is the manager's data delegate; it owns the
+    // collection view and is the object that has -reloadData.
+    id vc = nil;
+    @try { vc = [mgr valueForKey:@"_dataDelegate"]; } @catch (__unused NSException *e) {}
+
+    // 1) Rebuild our section's items (re-enter our hook so titles get rebuilt).
+    SEL upd = sel_getUid("updateSectionForCategory:withEntry:");
+    if ([mgr respondsToSelector:upd]) {
+        ((void (*)(id, SEL, NSUInteger, id))objc_msgSend)(mgr, upd, (NSUInteger)YTLocalQueueSection, nil);
     }
 
-    // The data is rebuilt, but the visible rows won't change until the settings
-    // view reloads. Find the owning view controller via the manager's delegate
-    // and reload it. We try a few known selectors and fall back gracefully.
-    id delegate = nil;
-    @try { delegate = [mgr valueForKey:@"_dataDelegate"]; } @catch (__unused NSException *e) {}
-    NSArray *targets = delegate ? @[delegate, mgr] : @[mgr];
-    for (id target in targets) {
-        // YTSettingsViewController-style reloads.
-        for (NSString *selName in @[@"reloadData", @"reloadView", @"reloadContent", @"setNeedsReload"]) {
-            SEL s = sel_getUid(selName.UTF8String);
-            if ([target respondsToSelector:s]) {
-                ((void (*)(id, SEL))objc_msgSend)(target, s);
-                return;
-            }
+    // 2) Reload the visible UI. Try the view controller first, then the manager,
+    //    then a raw collection view if exposed. Done on the main queue next
+    //    runloop tick so the data change above is already committed.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        SEL reload = sel_getUid("reloadData");
+        if (vc && [vc respondsToSelector:reload]) {
+            ((void (*)(id, SEL))objc_msgSend)(vc, reload);
+            return;
         }
-        // Some builds expose the collection view directly.
-        @try {
-            id collectionView = [target valueForKey:@"_collectionView"];
-            if (collectionView && [collectionView respondsToSelector:sel_getUid("reloadData")]) {
-                ((void (*)(id, SEL))objc_msgSend)(collectionView, sel_getUid("reloadData"));
-                return;
-            }
-        } @catch (__unused NSException *e) {}
-    }
+        if ([mgr respondsToSelector:reload]) {
+            ((void (*)(id, SEL))objc_msgSend)(mgr, reload);
+            return;
+        }
+        for (id target in (vc ? @[vc, mgr] : @[mgr])) {
+            @try {
+                id cv = [target valueForKey:@"_collectionView"];
+                if (cv && [cv respondsToSelector:reload]) {
+                    ((void (*)(id, SEL))objc_msgSend)(cv, reload);
+                    return;
+                }
+            } @catch (__unused NSException *e) {}
+        }
+    });
 }
 
 __attribute__((constructor)) static void YTLP_InstallSettingsHooks(void) {

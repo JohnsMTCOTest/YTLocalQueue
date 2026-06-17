@@ -1210,95 +1210,21 @@ static CollectionViewCellSetSelectedIMP origCollectionViewCellSetSelected = NULL
 // Gesture recognizer approach disabled for now due to method signature issues
 
 static void ytlp_buttonSendActions(id self, SEL _cmd, NSUInteger controlEvents, id event) {
-    // CRASH FIX: Only probe buttons that live inside a video collection cell.
-    // The previous version hooked EVERY UIButton in the app and KVC-probed
-    // arbitrary keys ("data", "entry", ...) up the superview chain. On views
-    // that don't really have those keys (e.g. the settings switch cell), KVC's
-    // fallback returned non-object scalars / garbage pointers that crashed
-    // objc_retain (the EXC_BAD_ACCESS at 0x8004... seen in the crash logs).
-    // Gating to _ASCollectionViewCell + using ytlp_safeValueForKey eliminates
-    // both the crash source and a large amount of wasted work on every tap.
-    @try {
-        BOOL insideVideoCell = NO;
-        UIView *probe = [self isKindOfClass:[UIView class]] ? (UIView *)self : nil;
-        for (int i = 0; i < 10 && probe; i++) {
-            if ([probe isKindOfClass:NSClassFromString(@"_ASCollectionViewCell")]) {
-                insideVideoCell = YES;
-                break;
-            }
-            probe = [probe superview];
-        }
-
-        if (insideVideoCell) {
-            NSString *videoId = nil;
-            NSString *title = nil;
-
-            // Look in the button and its parent views for video information
-            UIView *currentView = (UIView *)self;
-            for (int level = 0; level < 10 && currentView; level++) {
-                id renderer  = ytlp_safeValueForKey(currentView, @"renderer");
-                id videoData = ytlp_safeValueForKey(currentView, @"videoData");
-                id entry     = ytlp_safeValueForKey(currentView, @"entry");
-                id data      = ytlp_safeValueForKey(currentView, @"data");
-
-                if (renderer) {
-                    ytlp_extractVideoInfo(renderer, &videoId, &title);
-                    if (videoId.length > 0) break;
-                }
-                if (videoData) {
-                    ytlp_extractVideoInfo(videoData, &videoId, &title);
-                    if (videoId.length > 0) break;
-                }
-                if (entry) {
-                    ytlp_extractVideoInfo(entry, &videoId, &title);
-                    if (videoId.length > 0) break;
-                }
-                if (data) {
-                    ytlp_extractVideoInfo(data, &videoId, &title);
-                    if (videoId.length > 0) break;
-                }
-
-                currentView = [currentView superview];
-            }
-
-            if (videoId.length > 0) {
-                ytlp_captureVideoTap(self, videoId, title);
-            }
-        }
-    } @catch (__unused NSException *e) {}
-    
-    // Call original implementation
+    // NEUTRALIZED: previously probed self + superview chain via KVC on every
+    // UIControl action (including the settings UISwitch), which retained garbage
+    // pointers and crashed (EXC_BAD_ACCESS in objc_retain on every tap). Video
+    // capture now happens only through the menu "Play next in queue" path, which
+    // is safe. This hook is a pure pass-through.
     if (origButtonSendActions) {
         origButtonSendActions(self, _cmd, controlEvents, event);
     }
 }
 
+
 // Collection view cell selection hook to capture video when user interacts with video list items
 static void ytlp_collectionViewCellSetSelected(id self, SEL _cmd, BOOL selected) {
-    @try {
-        if (selected && [self isKindOfClass:NSClassFromString(@"_ASCollectionViewCell")]) {
-            NSString *currentVideoId = ytlp_currentPlayerVC ? [ytlp_currentPlayerVC currentVideoID] : nil;
-            
-            // Extract video info from the selected cell's node
-            @try {
-                id node = ytlp_safeValueForKey(self, @"node");
-                if (node) {
-                    NSString *videoId = nil;
-                    NSString *title = nil;
-                    ytlp_extractVideoInfo(node, &videoId, &title);
-                    
-                    if (videoId.length > 0) {
-                        BOOL isDifferent = ![videoId isEqualToString:currentVideoId];
-                        if (isDifferent) {
-                            ytlp_captureVideoTap(self, videoId, title);
-                        }
-                    }
-                }
-            } @catch (__unused NSException *e) {}
-        }
-    } @catch (__unused NSException *e) {}
-    
-    // Call original implementation
+    // NEUTRALIZED: previously deep-scanned the selected cell's node via KVC,
+    // which could retain garbage and crash on tap. Pure pass-through now.
     if (origCollectionViewCellSetSelected) {
         origCollectionViewCellSetSelected(self, _cmd, selected);
     }

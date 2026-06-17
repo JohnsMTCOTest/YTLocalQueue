@@ -706,7 +706,7 @@ static void ytlp_collectAllVideoIds(id obj, int depth, NSMutableSet *collected, 
             // Get parentResponder (YTVideoElementCellController)
             id parentResponder = nil;
             @try {
-                parentResponder = [obj valueForKey:@"parentResponder"];
+                parentResponder = ytlp_safeValueForKey(obj, @"parentResponder");
             } @catch (__unused NSException *e) {}
             
             if (parentResponder) {
@@ -733,7 +733,7 @@ static void ytlp_collectAllVideoIds(id obj, int depth, NSMutableSet *collected, 
                             }
                             
                             @try {
-                                id propVal = [parentResponder valueForKey:propName];
+                                id propVal = ytlp_safeValueForKey(parentResponder, propName);
                                 if (!propVal) continue;
                                 
                                 if ([propVal isKindOfClass:[NSString class]]) {
@@ -783,20 +783,20 @@ static void ytlp_collectAllVideoIds(id obj, int depth, NSMutableSet *collected, 
                                         // List all fields using GPB introspection
                                         SEL fieldsSel = NSSelectorFromString(@"descriptor");
                                         if ([propVal respondsToSelector:fieldsSel]) {
-                                            id descriptor = [propVal valueForKey:@"descriptor"];
+                                            id descriptor = ytlp_safeValueForKey(propVal, @"descriptor");
                                             if (descriptor) {
                                                 // Try to get fields
                                                 SEL fieldsSel2 = NSSelectorFromString(@"fields");
                                                 if ([descriptor respondsToSelector:fieldsSel2]) {
-                                                    NSArray *fields = [descriptor valueForKey:@"fields"];
+                                                    NSArray *fields = ytlp_safeValueForKey(descriptor, @"fields");
                                                     
                                                     for (id field in fields) {
                                                         @try {
-                                                            NSString *fieldName = [field valueForKey:@"name"];
+                                                            NSString *fieldName = ytlp_safeValueForKey(field, @"name");
                                                             if (fieldName) {
                                                                 // Try to get value for this field
                                                                 @try {
-                                                                    id fieldValue = [propVal valueForKey:fieldName];
+                                                                    id fieldValue = ytlp_safeValueForKey(propVal, fieldName);
                                                                     if ([fieldValue isKindOfClass:[NSString class]]) {
                                                                         NSString *strVal = (NSString *)fieldValue;
                                                                         if ([strVal length] == 11 && ytlp_looksLikeVideoId(strVal)) {
@@ -830,14 +830,14 @@ static void ytlp_collectAllVideoIds(id obj, int depth, NSMutableSet *collected, 
             
             // Also try ELMNodeController path carefully
             @try {
-                id controller = [obj valueForKey:@"controller"];
+                id controller = ytlp_safeValueForKey(obj, @"controller");
                 if (controller) {
                     // Try to get element data from controller
                     @try {
-                        id elementData = [controller valueForKey:@"elementData"];
+                        id elementData = ytlp_safeValueForKey(controller, @"elementData");
                         if (elementData) {
                             @try {
-                                id vid = [elementData valueForKey:@"videoId"];
+                                id vid = ytlp_safeValueForKey(elementData, @"videoId");
                                 if ([vid isKindOfClass:[NSString class]] && [vid length] == 11 && ytlp_looksLikeVideoId(vid)) {
                                     [collected addObject:vid];
                                 }
@@ -849,10 +849,10 @@ static void ytlp_collectAllVideoIds(id obj, int depth, NSMutableSet *collected, 
                     NSArray *ctrlPaths = @[@"model", @"data", @"videoData", @"contentData"];
                     for (NSString *path in ctrlPaths) {
                         @try {
-                            id pathVal = [controller valueForKey:path];
+                            id pathVal = ytlp_safeValueForKey(controller, path);
                             if (pathVal) {
                                 @try {
-                                    id vid = [pathVal valueForKey:@"videoId"];
+                                    id vid = ytlp_safeValueForKey(pathVal, @"videoId");
                                     if ([vid isKindOfClass:[NSString class]] && [vid length] == 11 && ytlp_looksLikeVideoId(vid)) {
                                         [collected addObject:vid];
                                     }
@@ -879,7 +879,7 @@ static void ytlp_collectAllVideoIds(id obj, int depth, NSMutableSet *collected, 
         for (NSString *key in videoIdKeys) {
             @try {
                 if (![obj respondsToSelector:NSSelectorFromString(key)]) continue;
-                id v = [obj valueForKey:key];
+                id v = ytlp_safeValueForKey(obj, key);
                 if ([v isKindOfClass:[NSString class]] && [v length] == 11 && ytlp_looksLikeVideoId(v)) {
                     [collected addObject:v];
                 }
@@ -908,7 +908,7 @@ static void ytlp_collectAllVideoIds(id obj, int depth, NSMutableSet *collected, 
                 SEL sel = NSSelectorFromString(k);
                 if (![obj respondsToSelector:sel]) continue;
                 
-                id child = [obj valueForKey:k];
+                id child = ytlp_safeValueForKey(obj, k);
                 if (child && ![dangerousClasses containsObject:NSStringFromClass([child class])]) {
                     ytlp_collectAllVideoIds(child, depth - 1, collected, visited);
                 }

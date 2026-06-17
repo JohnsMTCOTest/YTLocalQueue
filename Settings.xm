@@ -201,15 +201,6 @@ static NSArray *ytlp_buildSectionItems(void) {
         });
     if (clear) [items addObject:clear];
 
-    // TEMP: landscape button-placement diagnostic (one row, removed once fixed).
-    NSString *landDbg = [[NSUserDefaults standardUserDefaults] objectForKey:@"ytlp_dbg_land"];
-    if (landDbg.length > 0) {
-        id landRow = ytlp_makeSelectItem(SectionItemClass,
-            [NSString stringWithFormat:@"DBG %@", landDbg],
-            ^BOOL(id cell, NSUInteger arg1) { return NO; });
-        if (landRow) [items addObject:landRow];
-    }
-
     // Version info (non-interactive)
     id versionItem = ytlp_makeSelectItem(SectionItemClass,
         [NSString stringWithFormat:@"Version %@", kYTLPVersion],

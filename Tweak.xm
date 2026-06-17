@@ -2445,10 +2445,13 @@ static void ytlp_setTopOverlayVisible(id self, SEL _cmd, BOOL visible, BOOL canc
                     CGFloat h = anyBtn.bounds.size.height > 0 ? anyBtn.bounds.size.height : 40.0;
                     CGFloat y = anyBtn.frame.origin.y > 0 ? anyBtn.frame.origin.y : 12.0;
                     CGFloat gap = 8.0;
-                    // Place to the LEFT of the right-edge cluster. The native
-                    // right cluster occupies roughly the last ~90pt; start left
-                    // of that and lay our buttons out leftward from there.
-                    CGFloat rightAnchor = sv.bounds.size.width - 100.0;
+                    // Place to the LEFT of the right-edge cluster. Diagnostics
+                    // showed the native cluster (autoplay/Cast/CC) is wider than
+                    // first estimated -- at offset 100 the buttons (x=284) still
+                    // sat under Cast/CC. Move further left to clear it. We anchor
+                    // relative to the right edge and lay our two buttons out
+                    // leftward from there.
+                    CGFloat rightAnchor = sv.bounds.size.width - 180.0;
                     CGFloat x = rightAnchor;
                     if (nextBtn) {
                         x -= w;

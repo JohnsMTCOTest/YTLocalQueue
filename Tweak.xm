@@ -15,6 +15,7 @@
 #import "Headers/YouTubeHeader/YTICommand.h"
 #import "Headers/YouTubeHeader/YTCoWatchWatchEndpointWrapperCommandHandler.h"
 #import "Headers/YouTubeHeader/GOOHUDManagerInternal.h"
+#import "Headers/YouTubeHeader/YTHUDMessage.h"
 #import "Headers/YouTubeHeader/YTAppDelegate.h"
 #import "Headers/YouTubeHeader/YTIMenuRenderer.h"
 #import "Headers/YouTubeHeader/YTIMenuItemSupportedRenderers.h"
@@ -169,10 +170,7 @@ static id ytlp_safeValueForKey(id obj, NSString *key) {
 + (id)watchNavigationEndpointWithVideoID:(NSString *)videoId;
 @end
 
-// Forward declarations for YTHUDMessage
-@interface YTHUDMessage : NSObject
-+ (id)messageWithText:(NSString *)text;
-@end
+// YTHUDMessage (+ messageWithText:) is declared in YouTubeHeader/YTHUDMessage.h
 
 // Forward declarations for video objects
 @interface NSObject (YTLocalQueueVideoHelpers)

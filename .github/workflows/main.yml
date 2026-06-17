@@ -22,8 +22,21 @@ jobs:
         run: |
           make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
 
-      - name: Upload Compiled Package
+      - name: Collect dylib
+        run: |
+          mkdir -p out
+          find .theos -name 'YTLocalQueue.dylib' -exec cp {} out/ \; || true
+          echo "---- Contents of out/ ----"
+          ls -la out/
+
+      - name: Upload Dylib
         uses: actions/upload-artifact@v4
         with:
-          name: YTLocalQueue-Build
+          name: YTLocalQueue-dylib
+          path: out/YTLocalQueue.dylib
+
+      - name: Upload Deb (backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: YTLocalQueue-deb
           path: packages/*.deb

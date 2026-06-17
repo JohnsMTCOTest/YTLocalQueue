@@ -72,6 +72,8 @@ static id ytlp_makeToggleRow(Class cls, NSString *label, NSString *defaultsKey, 
         NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
         BOOL now = [d boolForKey:keyCopy];
         [d setBool:!now forKey:keyCopy];
+        // Rebuild + reload the settings list so this row's "On/Off" text updates
+        // in place (YTUHD-style reloadData on the settings view controller).
         ytlp_refreshSettings();
         return YES;
     });
@@ -231,8 +233,14 @@ static __weak id gYTLPSettingsManager = nil;
 static void ytlp_updateSection(id self, SEL _cmd, NSUInteger category, id entry) {
     if (category == (NSUInteger)YTLocalQueueSection) {
         gYTLPSettingsManager = self; // remember for refreshes
+        // YTUHD and other working tweaks fetch the settings view controller via
+        // the manager's _settingsViewControllerDelegate ivar (NOT _dataDelegate).
+        // This is the object that has -setSectionItems:... and -reloadData.
         id delegate = nil;
-        @try { delegate = [self valueForKey:@"_dataDelegate"]; } @catch (__unused NSException *e) {}
+        @try { delegate = [self valueForKey:@"_settingsViewControllerDelegate"]; } @catch (__unused NSException *e) {}
+        if (!delegate) {
+            @try { delegate = [self valueForKey:@"_dataDelegate"]; } @catch (__unused NSException *e) {}
+        }
         NSArray *items = ytlp_buildSectionItems();
         SEL selWithIcon = sel_getUid("setSectionItems:forCategory:title:icon:titleDescription:headerHidden:");
         SEL selNoIcon   = sel_getUid("setSectionItems:forCategory:title:titleDescription:headerHidden:");
@@ -246,98 +254,30 @@ static void ytlp_updateSection(id self, SEL _cmd, NSUInteger category, id entry)
     if (origUpdateSection) origUpdateSection(self, _cmd, category, entry);
 }
 
-// Try hard to reload whatever view is currently showing our settings rows.
-// Different YouTube builds expose the settings UI differently, so rather than
-// rely on one private ivar we probe several reliable handles.
-static void ytlp_reloadAnySettingsView(id mgr) {
-    SEL reloadSel = sel_getUid("reloadData");
-
-    // Collect candidate objects that might own the visible table/collection view.
-    NSMutableArray *candidates = [NSMutableArray array];
-    if (mgr) [candidates addObject:mgr];
-
-    // The manager's data delegate is usually the settings view controller.
-    @try {
-        id d = [mgr valueForKey:@"_dataDelegate"];
-        if (d) [candidates addObject:d];
-    } @catch (__unused NSException *e) {}
-    @try {
-        id d = [mgr valueForKey:@"dataDelegate"];
-        if (d) [candidates addObject:d];
-    } @catch (__unused NSException *e) {}
-    @try {
-        id pr = [mgr valueForKey:@"parentResponder"];
-        if (pr) [candidates addObject:pr];
-    } @catch (__unused NSException *e) {}
-
-    // Also walk the presented-view-controller chain from the key window: the
-    // settings screen is presented modally, so its VC is reachable this way.
-    @try {
-        UIWindow *keyWindow = nil;
-        for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive) {
-                for (UIWindow *w in scene.windows) { if (w.isKeyWindow) { keyWindow = w; break; } }
-            }
-            if (keyWindow) break;
-        }
-        UIViewController *vc = keyWindow.rootViewController;
-        while (vc) {
-            [candidates addObject:vc];
-            if (vc.presentedViewController) { vc = vc.presentedViewController; }
-            else break;
-        }
-    } @catch (__unused NSException *e) {}
-
-    // For each candidate, try reloadData directly, then on a few likely subviews.
-    for (id c in candidates) {
-        if ([c respondsToSelector:reloadSel]) {
-            ((void (*)(id, SEL))objc_msgSend)(c, reloadSel);
-            return;
-        }
-        for (NSString *key in @[@"_collectionView", @"collectionView", @"_tableView", @"tableView", @"view"]) {
-            @try {
-                id sub = [c valueForKey:key];
-                if (sub && [sub respondsToSelector:reloadSel]) {
-                    ((void (*)(id, SEL))objc_msgSend)(sub, reloadSel);
-                    return;
-                }
-            } @catch (__unused NSException *e) {}
-        }
-        // If candidate is a UIViewController, scan its view's subviews for a
-        // UITableView/UICollectionView and reload that.
-        if ([c isKindOfClass:[UIViewController class]]) {
-            UIView *root = [(UIViewController *)c view];
-            NSMutableArray *stack = root ? [@[root] mutableCopy] : [NSMutableArray array];
-            while (stack.count) {
-                UIView *v = stack.lastObject; [stack removeLastObject];
-                if (([v isKindOfClass:[UITableView class]] || [v isKindOfClass:[UICollectionView class]])
-                    && [v respondsToSelector:reloadSel]) {
-                    ((void (*)(id, SEL))objc_msgSend)(v, reloadSel);
-                    return;
-                }
-                for (UIView *sv in v.subviews) [stack addObject:sv];
-            }
-        }
-    }
-}
-
 // Rebuild our settings section so the On/Off row titles reflect the new state,
-// then reload the settings view so the change is visible immediately.
+// then reload the settings view -- modeled on YTUHD, which calls -reloadData on
+// the manager's _settingsViewControllerDelegate after changing a value.
 static void ytlp_refreshSettings(void) {
     id mgr = gYTLPSettingsManager;
     if (!mgr) return;
 
-    // 1) Rebuild our section's items (re-enter our hook so titles get rebuilt).
+    // 1) Rebuild our section's items (re-enter our hook so the On/Off titles get
+    //    rebuilt and re-set on the settings view controller).
     SEL upd = sel_getUid("updateSectionForCategory:withEntry:");
     if ([mgr respondsToSelector:upd]) {
         ((void (*)(id, SEL, NSUInteger, id))objc_msgSend)(mgr, upd, (NSUInteger)YTLocalQueueSection, nil);
     }
 
-    // 2) Reload the visible UI on the next main-queue tick (after the data
-    //    change above has been committed).
-    dispatch_async(dispatch_get_main_queue(), ^{
-        ytlp_reloadAnySettingsView(mgr);
-    });
+    // 2) Reload the settings view controller (same call YTUHD uses).
+    id vc = nil;
+    @try { vc = [mgr valueForKey:@"_settingsViewControllerDelegate"]; } @catch (__unused NSException *e) {}
+    if (!vc) {
+        @try { vc = [mgr valueForKey:@"_dataDelegate"]; } @catch (__unused NSException *e) {}
+    }
+    SEL reloadSel = sel_getUid("reloadData");
+    if (vc && [vc respondsToSelector:reloadSel]) {
+        ((void (*)(id, SEL))objc_msgSend)(vc, reloadSel);
+    }
 }
 
 __attribute__((constructor)) static void YTLP_InstallSettingsHooks(void) {

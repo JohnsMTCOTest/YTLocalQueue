@@ -206,7 +206,7 @@ static NSArray *ytlp_buildSectionItems(void) {
     // debug button placement + toggle refresh without a Mac/Console. Tap a
     // toggle, then re-open this screen to see updated values.
     NSUserDefaults *dd = [NSUserDefaults standardUserDefaults];
-    NSArray *dbgKeys = @[@"ytlp_dbg_button", @"ytlp_dbg_array", @"ytlp_dbg_arraybtn", @"ytlp_dbg_toggle"];
+    NSArray *dbgKeys = @[@"ytlp_dbg_button", @"ytlp_dbg_button2", @"ytlp_dbg_array", @"ytlp_dbg_arraybtn", @"ytlp_dbg_toggle"];
     for (NSString *k in dbgKeys) {
         NSString *val = [dd objectForKey:k];
         if (val.length > 0) {

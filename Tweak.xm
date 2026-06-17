@@ -2402,8 +2402,6 @@ static NSMutableArray *ytlp_topControls(id self, SEL _cmd) {
         // into the top-left next to the collapse chevron. Order: Queue then Next.
         if (queueBtn && YTLP_ShowQueueButton()) [controls addObject:queueBtn];
         if (nextBtn && YTLP_ShowPlayNextButton()) [controls addObject:nextBtn];
-        // TEMP DIAGNOSTIC: note that this array hook fired and how many controls.
-        [[NSUserDefaults standardUserDefaults] setObject:[NSString stringWithFormat:@"topControls fired, count=%lu", (unsigned long)controls.count] forKey:@"ytlp_dbg_array"];
     }
 
     return controls;
@@ -2419,7 +2417,6 @@ static NSMutableArray *ytlp_topButtonControls(id self, SEL _cmd) {
         // Right-side placement (see note in ytlp_topControls).
         if (queueBtn && YTLP_ShowQueueButton()) [controls addObject:queueBtn];
         if (nextBtn && YTLP_ShowPlayNextButton()) [controls addObject:nextBtn];
-        [[NSUserDefaults standardUserDefaults] setObject:[NSString stringWithFormat:@"topButtonControls fired, count=%lu", (unsigned long)controls.count] forKey:@"ytlp_dbg_arraybtn"];
     }
 
     return controls;
@@ -2458,10 +2455,12 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
             }
         }
 
-        // Open top band: just right of the collapse chevron, laid out rightward,
-        // well left of the center pause control and the right-side cluster.
+        // Centered-ish top band: start a bit left of the horizontal middle so
+        // the two buttons read as central along the TOP row (y~12) while staying
+        // clear of the big center play/pause control (which sits lower, mid
+        // height) and the right-side cluster. Two buttons (~24pt) + 10pt gap.
         CGFloat gap = 10.0;
-        CGFloat x = svW * 0.13;
+        CGFloat x = svW * 0.38;
         if (queueBtn) {
             queueBtn.frame = CGRectMake(x, topY, w, h);
             x += w + gap;

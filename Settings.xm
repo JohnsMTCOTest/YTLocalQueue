@@ -301,13 +301,6 @@ static void ytlp_refreshSettingsFromCell(id cell) {
 
     // Walk up the responder chain from the cell to find a view controller that
     // responds to reloadData (the YTSettingsViewController).
-    id responder = cell;
-    @try {
-        if ([cell isKindOfClass:[UIView class]]) {
-            responder = cell;
-        }
-    } @catch (__unused NSException *e) {}
-
     UIResponder *r = [cell isKindOfClass:[UIResponder class]] ? (UIResponder *)cell : nil;
     int hops = 0;
     while (r && hops < 30) {

@@ -24,23 +24,38 @@
 // PoomSmart's tweaks do), letting the compiler emit the correct ABI.
 // ---------------------------------------------------------------------------
 
-@interface YTSettingsSectionItem : NSObject
-+ (instancetype)switchItemWithTitle:(NSString *)title
-                   titleDescription:(NSString *)titleDescription
-            accessibilityIdentifier:(NSString *)accessibilityIdentifier
-                           switchOn:(BOOL)switchOn
-                        switchBlock:(BOOL (^)(id cell, BOOL enabled))switchBlock
-                      settingItemId:(NSInteger)settingItemId;
+// NOTE: We deliberately do NOT reference the YTSettingsSectionItem class
+// symbol directly. That class lives in the YouTube app binary, not in this
+// dylib, so a direct `[YTSettingsSectionItem ...]` call emits an undefined
+// link-time symbol (_OBJC_CLASS_$_YTSettingsSectionItem) that makes dyld abort
+// at launch ("symbol not found in flat namespace"). Instead we resolve the
+// class at runtime via objc_getClass() and send messages through typed
+// function-pointer casts of objc_msgSend whose signatures EXACTLY match the
+// real methods (correct arm64e ABI -> no toggle crash either).
 
-+ (instancetype)itemWithTitle:(NSString *)title
-             titleDescription:(NSString *)titleDescription
-      accessibilityIdentifier:(NSString *)accessibilityIdentifier
-              detailTextBlock:(NSString * (^)(void))detailTextBlock
-                  selectBlock:(BOOL (^)(id cell, NSUInteger arg))selectBlock;
-@end
+// Typed block aliases used by the casts below.
+typedef BOOL (^YTLPSwitchBlock)(id cell, BOOL enabled);
+typedef BOOL (^YTLPSelectBlock)(id cell, NSUInteger arg);
+typedef NSString * (^YTLPDetailBlock)(void);
 
-@interface YTUIUtilsCompat : NSObject
-@end
+// Build a switch item by sending switchItemWithTitle:... to the runtime class.
+static id ytlp_makeSwitchItem(Class cls, NSString *title, NSString *desc,
+                              BOOL on, YTLPSwitchBlock block) {
+    SEL sel = @selector(switchItemWithTitle:titleDescription:accessibilityIdentifier:switchOn:switchBlock:settingItemId:);
+    if (![cls respondsToSelector:sel]) return nil;
+    id (*send)(Class, SEL, NSString *, NSString *, NSString *, BOOL, YTLPSwitchBlock, NSInteger) =
+        (id (*)(Class, SEL, NSString *, NSString *, NSString *, BOOL, YTLPSwitchBlock, NSInteger))objc_msgSend;
+    return send(cls, sel, title, desc, nil, on, block, 0);
+}
+
+// Build a plain (tappable) item by sending itemWithTitle:... to the runtime class.
+static id ytlp_makeSelectItem(Class cls, NSString *title, YTLPSelectBlock block) {
+    SEL sel = @selector(itemWithTitle:titleDescription:accessibilityIdentifier:detailTextBlock:selectBlock:);
+    if (![cls respondsToSelector:sel]) return nil;
+    id (*send)(Class, SEL, NSString *, NSString *, NSString *, YTLPDetailBlock, YTLPSelectBlock) =
+        (id (*)(Class, SEL, NSString *, NSString *, NSString *, YTLPDetailBlock, YTLPSelectBlock))objc_msgSend;
+    return send(cls, sel, title, nil, nil, (YTLPDetailBlock)nil, block);
+}
 
 static const NSInteger YTLocalQueueSection = 931; // unique tweak section id
 static NSString *const kYTLPVersion = @"0.0.1+build22";
@@ -78,109 +93,81 @@ static void ytlp_showHUD(NSString *message) {
     }
 }
 
-// Build section items via typed method calls (safe ABI).
+// Build section items via runtime class resolution + typed objc_msgSend casts.
 static NSArray *ytlp_buildSectionItems(void) {
     NSMutableArray *items = [NSMutableArray array];
     Class SectionItemClass = objc_getClass("YTSettingsSectionItem");
     if (!SectionItemClass) return items;
 
-    // Guard: only proceed if the class actually responds to the switch selector
-    // on this YouTube build. If not, we simply skip the toggles rather than
-    // crash.
-    SEL switchSel = @selector(switchItemWithTitle:titleDescription:accessibilityIdentifier:switchOn:switchBlock:settingItemId:);
-    BOOL hasSwitch = [SectionItemClass respondsToSelector:switchSel];
+    // Auto advance toggle
+    id enableAuto = ytlp_makeSwitchItem(SectionItemClass,
+        @"Auto advance",
+        @"Automatically play next item from local queue when video ends",
+        YTLP_AutoAdvanceEnabled(),
+        ^BOOL(id cell, BOOL enabled) {
+            [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"ytlp_queue_auto_advance_enabled"];
+            return YES;
+        });
+    if (enableAuto) [items addObject:enableAuto];
 
-    if (hasSwitch) {
-        // Auto advance toggle
-        id enableAuto = [YTSettingsSectionItem
-            switchItemWithTitle:@"Auto advance"
-               titleDescription:@"Automatically play next item from local queue when video ends"
-        accessibilityIdentifier:nil
-                       switchOn:YTLP_AutoAdvanceEnabled()
-                    switchBlock:^BOOL(id cell, BOOL enabled) {
-                        [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"ytlp_queue_auto_advance_enabled"];
-                        return YES;
-                    }
-                  settingItemId:0];
-        if (enableAuto) [items addObject:enableAuto];
+    // Show Play Next button toggle
+    id showPlayNext = ytlp_makeSwitchItem(SectionItemClass,
+        @"Show Play Next button",
+        @"Show the Play Next button in the video player overlay",
+        YTLP_ShowPlayNextButton(),
+        ^BOOL(id cell, BOOL enabled) {
+            [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"ytlp_show_play_next_button"];
+            return YES;
+        });
+    if (showPlayNext) [items addObject:showPlayNext];
 
-        // Show Play Next button toggle
-        id showPlayNext = [YTSettingsSectionItem
-            switchItemWithTitle:@"Show Play Next button"
-               titleDescription:@"Show the Play Next button in the video player overlay"
-        accessibilityIdentifier:nil
-                       switchOn:YTLP_ShowPlayNextButton()
-                    switchBlock:^BOOL(id cell, BOOL enabled) {
-                        [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"ytlp_show_play_next_button"];
-                        return YES;
-                    }
-                  settingItemId:0];
-        if (showPlayNext) [items addObject:showPlayNext];
+    // Show Queue button toggle
+    id showQueue = ytlp_makeSwitchItem(SectionItemClass,
+        @"Show Queue button",
+        @"Show the Queue button in the video player overlay",
+        YTLP_ShowQueueButton(),
+        ^BOOL(id cell, BOOL enabled) {
+            [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"ytlp_show_queue_button"];
+            return YES;
+        });
+    if (showQueue) [items addObject:showQueue];
 
-        // Show Queue button toggle
-        id showQueue = [YTSettingsSectionItem
-            switchItemWithTitle:@"Show Queue button"
-               titleDescription:@"Show the Queue button in the video player overlay"
-        accessibilityIdentifier:nil
-                       switchOn:YTLP_ShowQueueButton()
-                    switchBlock:^BOOL(id cell, BOOL enabled) {
-                        [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"ytlp_show_queue_button"];
-                        return YES;
-                    }
-                  settingItemId:0];
-        if (showQueue) [items addObject:showQueue];
-    }
+    // Open Local Queue
+    id openUI = ytlp_makeSelectItem(SectionItemClass,
+        @"Open Local Queue",
+        ^BOOL(id cell, NSUInteger arg1) {
+            Class UIUtils = objc_getClass("YTUIUtils");
+            UIViewController *presenting = nil;
+            if (UIUtils && [UIUtils respondsToSelector:sel_getUid("topViewControllerForPresenting")]) {
+                presenting = ((id (*)(id, SEL))objc_msgSend)(UIUtils, sel_getUid("topViewControllerForPresenting"));
+            }
+            if (!presenting) return NO;
+            YTLPLocalQueueViewController *vc = [[YTLPLocalQueueViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
+            UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+            [presenting presentViewController:nav animated:YES completion:nil];
+            return YES;
+        });
+    if (openUI) [items addObject:openUI];
 
-    SEL itemSel = @selector(itemWithTitle:titleDescription:accessibilityIdentifier:detailTextBlock:selectBlock:);
-    BOOL hasItem = [SectionItemClass respondsToSelector:itemSel];
+    // Clear Local Queue
+    id clear = ytlp_makeSelectItem(SectionItemClass,
+        @"Clear Local Queue",
+        ^BOOL(id cell, NSUInteger arg1) {
+            NSInteger count = [[YTLPLocalQueueManager shared] allItems].count;
+            [[YTLPLocalQueueManager shared] clear];
+            NSString *message = (count > 0)
+                ? [NSString stringWithFormat:@"Cleared %ld video%@", (long)count, count == 1 ? @"" : @"s"]
+                : @"Queue is empty";
+            ytlp_showHUD(message);
+            return YES;
+        });
+    if (clear) [items addObject:clear];
 
-    if (hasItem) {
-        // Open Local Queue
-        id openUI = [YTSettingsSectionItem
-            itemWithTitle:@"Open Local Queue"
-         titleDescription:nil
-  accessibilityIdentifier:nil
-          detailTextBlock:nil
-              selectBlock:^BOOL(id cell, NSUInteger arg1) {
-                  Class UIUtils = objc_getClass("YTUIUtils");
-                  UIViewController *presenting = nil;
-                  if (UIUtils && [UIUtils respondsToSelector:sel_getUid("topViewControllerForPresenting")]) {
-                      presenting = ((id (*)(id, SEL))objc_msgSend)(UIUtils, sel_getUid("topViewControllerForPresenting"));
-                  }
-                  if (!presenting) return NO;
-                  YTLPLocalQueueViewController *vc = [[YTLPLocalQueueViewController alloc] initWithStyle:UITableViewStyleInsetGrouped];
-                  UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
-                  [presenting presentViewController:nav animated:YES completion:nil];
-                  return YES;
-              }];
-        if (openUI) [items addObject:openUI];
-
-        // Clear Local Queue
-        id clear = [YTSettingsSectionItem
-            itemWithTitle:@"Clear Local Queue"
-         titleDescription:nil
-  accessibilityIdentifier:nil
-          detailTextBlock:nil
-              selectBlock:^BOOL(id cell, NSUInteger arg1) {
-                  NSInteger count = [[YTLPLocalQueueManager shared] allItems].count;
-                  [[YTLPLocalQueueManager shared] clear];
-                  NSString *message = (count > 0)
-                      ? [NSString stringWithFormat:@"Cleared %ld video%@", (long)count, count == 1 ? @"" : @"s"]
-                      : @"Queue is empty";
-                  ytlp_showHUD(message);
-                  return YES;
-              }];
-        if (clear) [items addObject:clear];
-
-        // Version info (non-interactive)
-        id versionItem = [YTSettingsSectionItem
-            itemWithTitle:[NSString stringWithFormat:@"Version %@", kYTLPVersion]
-         titleDescription:nil
-  accessibilityIdentifier:nil
-          detailTextBlock:nil
-              selectBlock:^BOOL(id cell, NSUInteger arg1) { return NO; }];
-        if (versionItem) [items addObject:versionItem];
-    }
+    // Version info (non-interactive)
+    id versionItem = ytlp_makeSelectItem(SectionItemClass,
+        [NSString stringWithFormat:@"Version %@", kYTLPVersion],
+        ^BOOL(id cell, NSUInteger arg1) { return NO; });
+    if (versionItem) [items addObject:versionItem];
 
     return items;
 }

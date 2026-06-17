@@ -53,14 +53,43 @@ static id ytlp_makeSelectItem(Class cls, NSString *title, YTLPSelectBlock block)
 static void ytlp_refreshSettings(void);
 static void ytlp_refreshSettingsFromCell(id cell);
 
-// Build a tap-to-toggle row. This deliberately AVOIDS the switchItem:...switchBlock:
-// path. Disassembly of the crashing build showed the BOOL argument that sits
-// immediately before the switchBlock gets miscompiled on arm64e (the runtime
-// retains the BOOL as if it were an object -> objc_retain on a garbage 0x8004...
-// address the moment the switch fires). The itemWithTitle:...selectBlock: path
-// has no such BOOL-before-block shape and is already proven to work for the
-// other rows, so we use it here. The row's title shows the current On/Off state
-// and tapping it flips the stored default and refreshes the screen.
+// Switch-block type matching YouTube's switchItemWithTitle:...switchBlock:...
+// The block receives the cell and the new BOOL state; returns whether the
+// change is accepted. A real UISwitch updates its own visual immediately, so
+// no settings-screen reload is needed (this is how YTUHD's switches work).
+typedef BOOL (^YTLPSwitchBlock)(id cell, BOOL enabled);
+
+// Build a NATIVE switch row via switchItemWithTitle:titleDescription:
+// accessibilityIdentifier:switchOn:switchBlock:settingItemId: -- the exact
+// signature YTUHD uses. The earlier switch crash was caused by the global
+// sendActionsForControlEvents: swizzle (since removed), NOT by this item, and
+// we use a precisely-typed objc_msgSend cast so the arm64e ABI is correct
+// (title, desc, accId are objects; switchOn is BOOL; switchBlock is a block;
+// settingItemId is NSInteger). The switch redraws itself on toggle, giving the
+// instant in-place feedback the tap-rows could not.
+static id ytlp_makeSwitchRow(Class cls, NSString *label, NSString *defaultsKey, BOOL defaultValue) {
+    SEL sel = @selector(switchItemWithTitle:titleDescription:accessibilityIdentifier:switchOn:switchBlock:settingItemId:);
+    if (![cls respondsToSelector:sel]) return nil;
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    BOOL current = ([defaults objectForKey:defaultsKey] == nil)
+        ? defaultValue
+        : [defaults boolForKey:defaultsKey];
+
+    NSString *keyCopy = [defaultsKey copy];
+    YTLPSwitchBlock switchBlock = [^BOOL(id cell, BOOL enabled) {
+        (void)cell;
+        [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:keyCopy];
+        return YES;
+    } copy];
+
+    id (*send)(Class, SEL, NSString *, NSString *, NSString *, BOOL, YTLPSwitchBlock, NSInteger) =
+        (id (*)(Class, SEL, NSString *, NSString *, NSString *, BOOL, YTLPSwitchBlock, NSInteger))objc_msgSend;
+    return send(cls, sel, label, nil, nil, current, switchBlock, 0);
+}
+
+// Build a tap-to-toggle row. (Retained as a fallback for builds where the
+// native switch item is unavailable; the native switch is preferred.)
 static id ytlp_makeToggleRow(Class cls, NSString *label, NSString *defaultsKey, BOOL defaultValue) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     BOOL current = ([defaults objectForKey:defaultsKey] == nil)
@@ -73,10 +102,6 @@ static id ytlp_makeToggleRow(Class cls, NSString *label, NSString *defaultsKey, 
         NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
         BOOL now = [d boolForKey:keyCopy];
         [d setBool:!now forKey:keyCopy];
-        // Rebuild + reload the settings list so this row's "On/Off" text updates
-        // in place (YTUHD-style reloadData on the settings view controller).
-        // Pass the tapped cell so we can locate the live settings VC via its
-        // responder chain (more reliable than the captured weak manager ref).
         ytlp_refreshSettingsFromCell(cell);
         return YES;
     });
@@ -124,18 +149,24 @@ static NSArray *ytlp_buildSectionItems(void) {
     Class SectionItemClass = objc_getClass("YTSettingsSectionItem");
     if (!SectionItemClass) return items;
 
-    // Auto advance (tap-to-toggle row, not a switch -- see ytlp_makeToggleRow)
-    id enableAuto = ytlp_makeToggleRow(SectionItemClass,
+    // Auto advance (native switch row; falls back to tap row if unavailable)
+    id enableAuto = ytlp_makeSwitchRow(SectionItemClass,
+        @"Auto advance", @"ytlp_queue_auto_advance_enabled", NO);
+    if (!enableAuto) enableAuto = ytlp_makeToggleRow(SectionItemClass,
         @"Auto advance", @"ytlp_queue_auto_advance_enabled", NO);
     if (enableAuto) [items addObject:enableAuto];
 
-    // Show Play Next button (tap-to-toggle row)
-    id showPlayNext = ytlp_makeToggleRow(SectionItemClass,
+    // Show Play Next button (native switch row)
+    id showPlayNext = ytlp_makeSwitchRow(SectionItemClass,
+        @"Show Play Next button", @"ytlp_show_play_next_button", YES);
+    if (!showPlayNext) showPlayNext = ytlp_makeToggleRow(SectionItemClass,
         @"Show Play Next button", @"ytlp_show_play_next_button", YES);
     if (showPlayNext) [items addObject:showPlayNext];
 
-    // Show Queue button (tap-to-toggle row)
-    id showQueue = ytlp_makeToggleRow(SectionItemClass,
+    // Show Queue button (native switch row)
+    id showQueue = ytlp_makeSwitchRow(SectionItemClass,
+        @"Show Queue button", @"ytlp_show_queue_button", YES);
+    if (!showQueue) showQueue = ytlp_makeToggleRow(SectionItemClass,
         @"Show Queue button", @"ytlp_show_queue_button", YES);
     if (showQueue) [items addObject:showQueue];
 
@@ -342,7 +373,37 @@ static void ytlp_refreshSettingsFromCell(id cell) {
         reloaded = YES;
     }
 
-    NSString *finalDbg = [NSString stringWithFormat:@"%@pushed=%d reloaded=%d", dbg, pushed, reloaded];
+    // The VC's reloadData updates its data model, but the already-visible
+    // collection view may not re-query until it next lays out. Force the
+    // collection view itself to reload too, and again on the next runloop tick
+    // (the tap is still being processed on this tick, so a deferred reload after
+    // the new section data is committed reliably redraws the row text).
+    BOOL cvReloaded = NO;
+    if (vc) {
+        for (NSString *key in @[@"_collectionView", @"collectionView", @"_tableView", @"tableView"]) {
+            @try {
+                id cv = [vc valueForKey:key];
+                if (cv && [cv respondsToSelector:reloadSel]) {
+                    ((void (*)(id, SEL))objc_msgSend)(cv, reloadSel);
+                    cvReloaded = YES;
+                    break;
+                }
+            } @catch (__unused NSException *e) {}
+        }
+    }
+    // Deferred re-reload on the next runloop tick for reliability.
+    if (vc) {
+        __strong id vcStrong = vc;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            @try {
+                if ([vcStrong respondsToSelector:reloadSel]) {
+                    ((void (*)(id, SEL))objc_msgSend)(vcStrong, reloadSel);
+                }
+            } @catch (__unused NSException *e) {}
+        });
+    }
+
+    NSString *finalDbg = [NSString stringWithFormat:@"%@pushed=%d reloaded=%d cv=%d", dbg, pushed, reloaded, cvReloaded];
     [[NSUserDefaults standardUserDefaults] setObject:finalDbg forKey:@"ytlp_dbg_toggle"];
 
     if (!pushed && !reloaded) {

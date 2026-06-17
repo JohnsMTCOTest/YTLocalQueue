@@ -2428,9 +2428,19 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
         CGFloat h = anyBtn.bounds.size.height > 0 ? anyBtn.bounds.size.height : 40.0;
         CGFloat svW = sv.bounds.size.width;
 
-        // Determine orientation from the WIDEST ancestor (our immediate container
-        // is only ~204pt even in landscape, so svW alone can't tell us). Walk up
-        // to the widest view in the chain.
+        // Determine orientation from the view's WINDOW, which reliably reflects
+        // the current interface orientation (UIScreen.bounds does not always
+        // rotate, which previously misfired the landscape path in portrait and
+        // broke portrait placement).
+        BOOL isLandscape = NO;
+        @try {
+            UIWindow *win = sv.window;
+            CGRect wb = win ? win.bounds : [UIScreen mainScreen].bounds;
+            isLandscape = wb.size.width > wb.size.height;
+        } @catch (__unused NSException *e) {}
+
+        // Find the widest ancestor (the full-width overlay) for coordinate
+        // conversion of the native cluster in landscape.
         UIView *widest = sv;
         UIView *cursor = sv;
         int hops = 0;
@@ -2440,8 +2450,6 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
             hops++;
         }
         CGFloat screenW = widest.bounds.size.width;
-        CGFloat screenH = widest.bounds.size.height;
-        BOOL isLandscape = screenW > screenH * 1.2;
 
         // Find YouTube's native right-side cluster (gear/CC/Cast). It lives in the
         // wide ancestor, NOT our small container -- so scan the widest view's
@@ -2489,22 +2497,29 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
 
         CGFloat gap = 10.0;
 
-        // TEMP DIAGNOSTIC.
-        if (isLandscape) {
+        // TEMP DIAGNOSTIC (both orientations) to verify orientation detection.
+        @try {
+            UIWindow *win = sv.window;
+            CGRect wb = win ? win.bounds : CGRectZero;
             NSString *info = [NSString stringWithFormat:
-                @"land screenW=%.0f rc=%d natLX=%.0f natY=%.0f",
-                screenW, rightCount, nativeLeftXInWidest, nativeTopYInWidest];
+                @"win=%.0fx%.0f land=%d rc=%d natLX=%.0f natY=%.0f",
+                wb.size.width, wb.size.height, isLandscape ? 1 : 0,
+                rightCount, nativeLeftXInWidest, nativeTopYInWidest];
             [[NSUserDefaults standardUserDefaults] setObject:info forKey:@"ytlp_dbg_land"];
-        }
+        } @catch (__unused NSException *e) {}
 
         if (isLandscape && nativeLeftXInWidest >= 0) {
             // Place our buttons just LEFT of the native cluster. Compute target
             // positions in the WIDEST view's coordinates, then convert each into
             // OUR container's coordinate space so the on-screen position is right
             // even though our buttons stay in their own container.
-            CGFloat totalWidth = (w * 2) + gap;
-            CGFloat startXWidest = nativeLeftXInWidest - gap - totalWidth;
-            CGFloat yWidest = nativeTopYInWidest;
+            CGFloat landGap = 16.0; // a touch more spacing between our two buttons
+            CGFloat totalWidth = (w * 2) + landGap;
+            CGFloat startXWidest = nativeLeftXInWidest - landGap - totalWidth;
+            // Nudge up a few points: our button's tappable frame is taller than
+            // the visible glyph, so matching the native frame-top sits slightly
+            // low. Shift up ~6pt to align the visible icons.
+            CGFloat yWidest = nativeTopYInWidest - 6.0;
             (void)nativeBtnW;
             @try {
                 // Queue button
@@ -2514,7 +2529,7 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
                     queueBtn.frame = CGRectMake(pLocal.x, pLocal.y, w, h);
                 }
                 if (nextBtn) {
-                    CGPoint pW = CGPointMake(startXWidest + w + gap, yWidest);
+                    CGPoint pW = CGPointMake(startXWidest + w + landGap, yWidest);
                     CGPoint pLocal = [sv convertPoint:pW fromView:widest];
                     nextBtn.frame = CGRectMake(pLocal.x, pLocal.y, w, h);
                 }

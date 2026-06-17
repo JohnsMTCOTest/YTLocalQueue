@@ -119,7 +119,7 @@ static NSArray *ytlp_buildSectionItems(void) {
     Class SectionItemClass = objc_getClass("YTSettingsSectionItem");
     if (!SectionItemClass) return items;
 
-    // Auto advance (tap-to-toggle row, not a switch â see ytlp_makeToggleRow)
+    // Auto advance (tap-to-toggle row, not a switch -- see ytlp_makeToggleRow)
     id enableAuto = ytlp_makeToggleRow(SectionItemClass,
         @"Auto advance", @"ytlp_queue_auto_advance_enabled", NO);
     if (enableAuto) [items addObject:enableAuto];
@@ -246,15 +246,41 @@ static void ytlp_updateSection(id self, SEL _cmd, NSUInteger category, id entry)
     if (origUpdateSection) origUpdateSection(self, _cmd, category, entry);
 }
 
-// Rebuild our settings section so the On/Off row titles reflect the new state.
+// Rebuild our settings section so the On/Off row titles reflect the new state,
+// then ask the settings UI to reload so the change is visible immediately.
 static void ytlp_refreshSettings(void) {
     id mgr = gYTLPSettingsManager;
     if (!mgr) return;
     SEL sel = sel_getUid("updateSectionForCategory:withEntry:");
     if ([mgr respondsToSelector:sel]) {
         // Re-enter our own hook (origUpdateSection was swizzled in); this calls
-        // ytlp_updateSection for our category and rebuilds the rows.
+        // ytlp_updateSection for our category and rebuilds the rows' data.
         ((void (*)(id, SEL, NSUInteger, id))objc_msgSend)(mgr, sel, (NSUInteger)YTLocalQueueSection, nil);
+    }
+
+    // The data is rebuilt, but the visible rows won't change until the settings
+    // view reloads. Find the owning view controller via the manager's delegate
+    // and reload it. We try a few known selectors and fall back gracefully.
+    id delegate = nil;
+    @try { delegate = [mgr valueForKey:@"_dataDelegate"]; } @catch (__unused NSException *e) {}
+    NSArray *targets = delegate ? @[delegate, mgr] : @[mgr];
+    for (id target in targets) {
+        // YTSettingsViewController-style reloads.
+        for (NSString *selName in @[@"reloadData", @"reloadView", @"reloadContent", @"setNeedsReload"]) {
+            SEL s = sel_getUid(selName.UTF8String);
+            if ([target respondsToSelector:s]) {
+                ((void (*)(id, SEL))objc_msgSend)(target, s);
+                return;
+            }
+        }
+        // Some builds expose the collection view directly.
+        @try {
+            id collectionView = [target valueForKey:@"_collectionView"];
+            if (collectionView && [collectionView respondsToSelector:sel_getUid("reloadData")]) {
+                ((void (*)(id, SEL))objc_msgSend)(collectionView, sel_getUid("reloadData"));
+                return;
+            }
+        } @catch (__unused NSException *e) {}
     }
 }
 

@@ -2490,10 +2490,21 @@ static void ytlp_setTopOverlayVisible(id self, SEL _cmd, BOOL visible, BOOL canc
                     CGRect f = anyBtn.frame;
                     CGRect svb = sv ? sv.bounds : CGRectZero;
                     NSString *info = [NSString stringWithFormat:
-                        @"super=%@ btnFrame={%.0f,%.0f,%.0f,%.0f} superBounds={%.0f,%.0f}",
-                        svClass, f.origin.x, f.origin.y, f.size.width, f.size.height,
-                        svb.size.width, svb.size.height];
+                        @"setX=%.0f super=%@ svW=%.0f",
+                        f.origin.x, svClass, svb.size.width];
                     [[NSUserDefaults standardUserDefaults] setObject:info forKey:@"ytlp_dbg_button"];
+
+                    // Deferred re-read: if YouTube re-lays-out after us, the frame
+                    // we just set will have changed by the next runloop tick. This
+                    // tells us definitively whether our positioning is overridden.
+                    __strong UIView *btnStrong = anyBtn;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        @try {
+                            CGRect later = btnStrong.frame;
+                            NSString *info2 = [NSString stringWithFormat:@"laterX=%.0f laterY=%.0f", later.origin.x, later.origin.y];
+                            [[NSUserDefaults standardUserDefaults] setObject:info2 forKey:@"ytlp_dbg_button2"];
+                        } @catch (__unused NSException *e) {}
+                    });
                 }
             } @catch (__unused NSException *e) {}
         }

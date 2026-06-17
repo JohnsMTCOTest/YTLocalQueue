@@ -369,7 +369,7 @@ static BOOL ytlp_shouldAllowQueueAdvance(NSString *reason) {
     }
 
     #if DEBUG
-    NSLog(@"[YTLocalQueue] â Allowing advance: %@", reason);
+    NSLog(@"[YTLocalQueue] Allowing advance: %@", reason);
     #endif
     return YES;
 }
@@ -465,7 +465,7 @@ static void ytlp_playNextFromQueue(void) {
         Class HUD = objc_getClass("GOOHUDManagerInternal");
         Class HUDMsg = objc_getClass("YTHUDMessage");
         if (HUD && HUDMsg) {
-            [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"â Queue complete"]];
+            [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"Queue complete"]];
         }
         return;
     }
@@ -501,7 +501,7 @@ static void ytlp_playNextFromQueue(void) {
                 Class HUD = objc_getClass("GOOHUDManagerInternal");
                 Class HUDMsg = objc_getClass("YTHUDMessage");
                 if (HUD && HUDMsg) {
-                    [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"â  Navigation failed, video re-added"]];
+                    [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"Navigation failed, video re-added"]];
                 }
             } else if ([currentVideoId isEqualToString:nextId]) {
                 // Successfully navigated
@@ -526,8 +526,8 @@ static void ytlp_playNextFromQueue(void) {
             NSString *displayName = (nextTitle.length > 0) ? nextTitle : nextId;
             if (displayName.length > 40) displayName = [[displayName substringToIndex:37] stringByAppendingString:@"..."];
             NSString *message = (remaining > 0)
-                ? [NSString stringWithFormat:@"â¶ %@ (%ld more)", displayName, (long)remaining]
-                : [NSString stringWithFormat:@"â¶ %@ (last)", displayName];
+                ? [NSString stringWithFormat:@"Now playing: %@ (%ld more)", displayName, (long)remaining]
+                : [NSString stringWithFormat:@"Now playing: %@ (last)", displayName];
             [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:message]];
         }
     }
@@ -585,7 +585,7 @@ static void ytlp_playNextFromQueueForced(void) {
         Class HUD = objc_getClass("GOOHUDManagerInternal");
         Class HUDMsg = objc_getClass("YTHUDMessage");
         if (HUD && HUDMsg) {
-            [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"â Queue complete"]];
+            [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"Queue complete"]];
         }
         return;
     }
@@ -609,8 +609,8 @@ static void ytlp_playNextFromQueueForced(void) {
         NSString *displayName = (nextTitle.length > 0) ? nextTitle : nextId;
         if (displayName.length > 40) displayName = [[displayName substringToIndex:37] stringByAppendingString:@"..."];
         NSString *message = (remaining > 0)
-            ? [NSString stringWithFormat:@"â¶ %@ (%ld more)", displayName, (long)remaining]
-            : [NSString stringWithFormat:@"â¶ %@ (last)", displayName];
+            ? [NSString stringWithFormat:@"Now playing: %@ (%ld more)", displayName, (long)remaining]
+            : [NSString stringWithFormat:@"Now playing: %@ (last)", displayName];
         [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:message]];
     }
 
@@ -1209,22 +1209,21 @@ static CollectionViewCellSetSelectedIMP origCollectionViewCellSetSelected = NULL
 
 // Gesture recognizer approach disabled for now due to method signature issues
 
+__attribute__((unused))
 static void ytlp_buttonSendActions(id self, SEL _cmd, NSUInteger controlEvents, id event) {
-    // NEUTRALIZED: previously probed self + superview chain via KVC on every
-    // UIControl action (including the settings UISwitch), which retained garbage
-    // pointers and crashed (EXC_BAD_ACCESS in objc_retain on every tap). Video
-    // capture now happens only through the menu "Play next in queue" path, which
-    // is safe. This hook is a pure pass-through.
+    // NOT INSTALLED. Kept only for reference. This was a global UIControl
+    // sendActionsForControlEvents: hook that crashed every switch in the app
+    // (wrong arg count on arm64e -> objc_retain on garbage). It is no longer
+    // swizzled in. Do not reinstall.
     if (origButtonSendActions) {
         origButtonSendActions(self, _cmd, controlEvents, event);
     }
 }
 
 
-// Collection view cell selection hook to capture video when user interacts with video list items
+// NOT INSTALLED. Kept only for reference. See note above.
+__attribute__((unused))
 static void ytlp_collectionViewCellSetSelected(id self, SEL _cmd, BOOL selected) {
-    // NEUTRALIZED: previously deep-scanned the selected cell's node via KVC,
-    // which could retain garbage and crash on tap. Pure pass-through now.
     if (origCollectionViewCellSetSelected) {
         origCollectionViewCellSetSelected(self, _cmd, selected);
     }
@@ -1457,7 +1456,7 @@ static void ytlp_handleVideoTimeChange(id self, YTSingleVideoTime *videoTime) {
             timeSinceLastAdvance > 10.0) { // Increased from 5.0 to 10.0 - less aggressive
 
             #if DEBUG
-            NSLog(@"[YTLocalQueue] â ï¸ Loop detected (backup): %.1f -> %.1f (this shouldn't happen often)", ytlp_lastTimeChangePosition, currentTime);
+            NSLog(@"[YTLocalQueue] Loop detected (backup): %.1f -> %.1f (this shouldn't happen often)", ytlp_lastTimeChangePosition, currentTime);
             #endif
 
             ytlp_endDetected = YES;
@@ -1772,10 +1771,10 @@ static NSMutableArray* ytlp_menuActionsForRenderers(id self, SEL _cmd, NSMutable
                     if (resolvedTitle.length > 0) {
                         NSString *displayName = resolvedTitle;
                         if (displayName.length > 35) displayName = [[displayName substringToIndex:32] stringByAppendingString:@"..."];
-                        if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:[NSString stringWithFormat:@"â Added: %@", displayName]]];
+                        if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:[NSString stringWithFormat:@"Added: %@", displayName]]];
                     } else {
                         // Show "Adding..." toast and fetch title in background
-                        if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"â Added to queue"]];
+                        if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"Added to queue"]];
                         
                         // Fetch title from YouTube API and update the stored item
                         NSString *capturedVideoId = [resolvedVideoId copy];
@@ -1788,7 +1787,7 @@ static NSMutableArray* ytlp_menuActionsForRenderers(id self, SEL _cmd, NSMutable
                 } else {
                     Class HUD = objc_getClass("GOOHUDManagerInternal");
                     Class HUDMsg = objc_getClass("YTHUDMessage");
-                    if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"â Failed to add video"]];
+                    if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"Failed to add video"]];
                 }
             };
 
@@ -2457,10 +2456,10 @@ static void ytlp_addToQueueTapped(id self, SEL _cmd, id sender) {
         if (title.length > 0) {
             NSString *displayName = title;
             if (displayName.length > 35) displayName = [[displayName substringToIndex:32] stringByAppendingString:@"..."];
-            if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:[NSString stringWithFormat:@"â Added: %@", displayName]]];
+            if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:[NSString stringWithFormat:@"Added: %@", displayName]]];
         } else {
             // Show simple toast and fetch title in background
-            if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"â Added to queue"]];
+            if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"Added to queue"]];
             
             NSString *capturedVideoId = [videoId copy];
             ytlp_fetchTitleForVideoId(capturedVideoId, ^(NSString *fetchedTitle) {
@@ -2470,7 +2469,7 @@ static void ytlp_addToQueueTapped(id self, SEL _cmd, id sender) {
             });
         }
     } else {
-        if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"â Could not add video"]];
+        if (HUD && HUDMsg) [[HUD sharedInstance] showMessageMainThread:[HUDMsg messageWithText:@"Could not add video"]];
     }
 }
 
@@ -2644,25 +2643,20 @@ __attribute__((constructor)) static void YTLP_InstallTweakHooks(void) {
                 }
             }
 
-            // Hook UIButton to capture video taps
-            Class UIButtonClass = objc_getClass("UIButton");
-            if (UIButtonClass) {
-                Method m = class_getInstanceMethod(UIButtonClass, @selector(sendActionsForControlEvents:));
-                if (m && !origButtonSendActions) {
-                    origButtonSendActions = (UIButtonSendActionsIMP)method_getImplementation(m);
-                    method_setImplementation(m, (IMP)ytlp_buttonSendActions);
-                }
-            }
+            // NOTE: We intentionally DO NOT swizzle UIButton's
+            // sendActionsForControlEvents: anymore. That hook was installed
+            // app-wide on UIControl, so it fired for EVERY control in the app
+            // (including every UISwitch in YouTube's native settings and in other
+            // tweaks). Its replacement IMP also declared a non-existent 4th
+            // parameter (sendActionsForControlEvents: takes only one argument),
+            // so on arm64e the runtime read a garbage register as an object and
+            // crashed in objc_retain the moment ANY switch/control was toggled.
+            // The hook is a no-op pass-through now, so we simply don't install
+            // it. Video capture happens via the menu "Play next in queue" path.
 
-            // Hook AsyncDisplayKit collection view cell selection to capture list interactions
-            Class ASCollectionViewCellClass = NSClassFromString(@"_ASCollectionViewCell");
-            if (ASCollectionViewCellClass) {
-                Method m = class_getInstanceMethod(ASCollectionViewCellClass, @selector(setSelected:));
-                if (m && !origCollectionViewCellSetSelected) {
-                    origCollectionViewCellSetSelected = (CollectionViewCellSetSelectedIMP)method_getImplementation(m);
-                    method_setImplementation(m, (IMP)ytlp_collectionViewCellSetSelected);
-                }
-            }
+            // (Removed) AsyncDisplayKit cell setSelected: hook -- same rationale:
+            // it was a neutralized pass-through providing no behavior, so there's
+            // no reason to install a global swizzle that only adds risk.
 
 
             // Hook YTSingleVideoController

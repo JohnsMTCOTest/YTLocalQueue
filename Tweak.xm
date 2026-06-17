@@ -2416,7 +2416,6 @@ static NSMutableArray *ytlp_topButtonControls(id self, SEL _cmd) {
 // is cheap.
 static BOOL   ytlp_cacheValid = NO;
 static BOOL   ytlp_cacheLandscape = NO;
-static CGFloat ytlp_cacheSvW = 0;       // container width the cache was computed at
 static CGFloat ytlp_cacheAnchorX = -1;  // nativeLeftXInWidest (widest coords)
 static CGFloat ytlp_cacheAnchorY = 0;   // nativeTopYInWidest (widest coords)
 static CGFloat ytlp_cacheTopYLocal = 12.0;
@@ -2460,11 +2459,13 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
 
         CGFloat gap = 10.0;
 
-        // CACHE CHECK: re-run the expensive native-cluster scan only when the
-        // orientation or container width changed. Otherwise reuse cached anchor.
-        BOOL cacheHit = ytlp_cacheValid
-                     && ytlp_cacheLandscape == isLandscape
-                     && fabs(ytlp_cacheSvW - svW) < 1.0;
+        // CACHE CHECK: the anchor only changes meaningfully with ORIENTATION.
+        // We deliberately do NOT key on container width -- width jitters by
+        // sub-pixels during playback and sweeps through many values during a
+        // rotation animation, and keying on it caused the scan to re-run
+        // constantly (severe lag). Orientation-only keying means one scan per
+        // rotation, then pure cache hits.
+        BOOL cacheHit = ytlp_cacheValid && ytlp_cacheLandscape == isLandscape;
 
         // Cheap perf accounting.
         ytlp_layoutCalls++;
@@ -2493,16 +2494,15 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
             }
             CGFloat screenW = widest.bounds.size.width;
 
-            // Find YouTube's native right-side cluster (gear/CC/Cast/autoplay).
-            // We collect ALL of them, then derive a STABLE anchor: the left edge
-            // of the tight right-hand group (gear/CC/Cast), deliberately ignoring
-            // the autoplay/next toggle which sits slightly left of that group and
-            // comes/goes with queue state (its appearance/disappearance otherwise
-            // shifts our anchor and opens a gap).
+            // Find YouTube's native top-right controls (gear/CC/Cast/autoplay).
+            // The autoplay control is ALWAYS present, so we simply anchor to the
+            // LEFTMOST native control in the cluster and place our buttons just
+            // to its left. (Earlier logic tried to skip an autoplay "slot" that
+            // we now know never actually vanishes -- that mis-anchored our
+            // buttons under the autoplay control. Leftmost is correct + simple.)
             nativeLeftXInWidest = -1;
             nativeTopYInWidest = 0;
             topYLocal = 12.0;
-            NSMutableArray<NSValue *> *nativeRects = [NSMutableArray array];
             @try {
                 NSMutableArray<UIView *> *stack = [@[widest] mutableCopy];
                 int guard = 0;
@@ -2516,40 +2516,12 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
                     BOOL smallish = fInWidest.size.width > 10 && fInWidest.size.width < 90.0
                                   && fInWidest.size.height > 10 && fInWidest.size.height < 90.0;
                     if (nearTop && onRight && smallish && !v.hidden && v.alpha > 0.01) {
-                        [nativeRects addObject:[NSValue valueWithCGRect:fInWidest]];
-                    }
-                    for (UIView *c in v.subviews) [stack addObject:c];
-                }
-            } @catch (__unused NSException *e) {}
-
-            // Derive the stable anchor: sort native rects right-to-left and walk
-            // leftward through the tight group, stopping at the first big gap
-            // (the autoplay slot). The left edge of the tight group is our anchor.
-            @try {
-                if (nativeRects.count) {
-                    [nativeRects sortUsingComparator:^NSComparisonResult(NSValue *a, NSValue *b) {
-                        CGFloat ax = [a CGRectValue].origin.x, bx = [b CGRectValue].origin.x;
-                        if (ax > bx) return NSOrderedAscending;
-                        if (ax < bx) return NSOrderedDescending;
-                        return NSOrderedSame;
-                    }];
-                    CGRect rightmost = [nativeRects[0] CGRectValue];
-                    CGFloat groupLeftX = rightmost.origin.x;
-                    CGFloat prevLeftX = rightmost.origin.x;
-                    CGFloat refW = rightmost.size.width > 0 ? rightmost.size.width : w;
-                    nativeTopYInWidest = rightmost.origin.y;
-                    CGFloat maxStep = refW * 2.2;
-                    for (NSUInteger i = 1; i < nativeRects.count; i++) {
-                        CGRect r = [nativeRects[i] CGRectValue];
-                        CGFloat stepDelta = prevLeftX - r.origin.x;
-                        if (stepDelta <= maxStep) {
-                            groupLeftX = r.origin.x;
-                            prevLeftX = r.origin.x;
-                        } else {
-                            break;
+                        if (nativeLeftXInWidest < 0 || fInWidest.origin.x < nativeLeftXInWidest) {
+                            nativeLeftXInWidest = fInWidest.origin.x;
+                            nativeTopYInWidest = fInWidest.origin.y;
                         }
                     }
-                    nativeLeftXInWidest = groupLeftX;
+                    for (UIView *c in v.subviews) [stack addObject:c];
                 }
             } @catch (__unused NSException *e) {}
 
@@ -2571,7 +2543,6 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
             if (!isLandscape || nativeLeftXInWidest >= 0) {
                 ytlp_cacheValid = YES;
                 ytlp_cacheLandscape = isLandscape;
-                ytlp_cacheSvW = svW;
                 ytlp_cacheAnchorX = nativeLeftXInWidest;
                 ytlp_cacheAnchorY = nativeTopYInWidest;
                 ytlp_cacheTopYLocal = topYLocal;

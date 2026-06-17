@@ -2414,6 +2414,72 @@ static NSMutableArray *ytlp_topButtonControls(id self, SEL _cmd) {
     return controls;
 }
 
+// Find YouTube's autoplay/autonav toggle within a container by walking subviews
+// and matching its accessibility label (varies by build, so we match loosely).
+static UIView *ytlp_findAutoplayToggle(UIView *container) {
+    if (!container) return nil;
+    NSMutableArray<UIView *> *stack = [@[container] mutableCopy];
+    while (stack.count) {
+        UIView *v = stack.lastObject; [stack removeLastObject];
+        @try {
+            NSString *label = v.accessibilityLabel ?: @"";
+            NSString *lower = label.lowercaseString;
+            if ([lower containsString:@"autoplay"] || [lower containsString:@"autonav"] || [lower containsString:@"auto-play"]) {
+                return v;
+            }
+        } @catch (__unused NSException *e) {}
+        for (UIView *sv in v.subviews) [stack addObject:sv];
+    }
+    return nil;
+}
+
+// Position our overlay buttons in a neat row just to the LEFT of YouTube's
+// autoplay toggle, matching the native button size. Runs while the overlay is
+// visible (after YouTube has laid out its own buttons), so the toggle's frame
+// is known. We DO NOT change how the buttons are added (array + subview both
+// stay), we only set their frames so they stop overlapping Cast/CC.
+static void ytlp_positionOverlayButtons(id controlsHost, NSDictionary *overlayButtons) {
+    if (!overlayButtons.count) return;
+
+    UIView *queueBtn = overlayButtons[@"showQueue"];
+    UIView *nextBtn  = overlayButtons[@"nextFromQueue"];
+
+    // The container our buttons live in (their superview).
+    UIView *anyBtn = queueBtn ?: nextBtn;
+    UIView *container = anyBtn.superview;
+    if (!container) return;
+
+    UIView *autoplay = ytlp_findAutoplayToggle(container);
+    // Fall back: if we can't find the autoplay toggle, anchor to the right edge.
+    CGFloat rightEdge;
+    CGFloat midY;
+    CGFloat btnSize = anyBtn.bounds.size.width > 0 ? anyBtn.bounds.size.width : 36.0;
+    CGFloat btnH    = anyBtn.bounds.size.height > 0 ? anyBtn.bounds.size.height : btnSize;
+
+    if (autoplay && autoplay.superview) {
+        CGRect f = [container convertRect:autoplay.bounds fromView:autoplay];
+        rightEdge = f.origin.x;                 // left edge of the autoplay toggle
+        midY = f.origin.y + f.size.height / 2.0;
+        if (autoplay.bounds.size.height > 0) btnH = autoplay.bounds.size.height;
+    } else {
+        rightEdge = container.bounds.size.width - 12.0;
+        midY = (queueBtn ?: nextBtn).center.y;
+    }
+
+    CGFloat gap = 6.0;
+    // Lay out right-to-left: Next sits closest to autoplay, then Queue to its left.
+    CGFloat x = rightEdge - gap;
+    if (nextBtn) {
+        x -= btnSize;
+        nextBtn.frame = CGRectMake(x, midY - btnH / 2.0, btnSize, btnH);
+        x -= gap;
+    }
+    if (queueBtn) {
+        x -= btnSize;
+        queueBtn.frame = CGRectMake(x, midY - btnH / 2.0, btnSize, btnH);
+    }
+}
+
 // Hook setTopOverlayVisible to control button visibility (alpha)
 static void ytlp_setTopOverlayVisible(id self, SEL _cmd, BOOL visible, BOOL canceledState) {
     if (origSetTopOverlayVisible) origSetTopOverlayVisible(self, _cmd, visible, canceledState);
@@ -2424,6 +2490,11 @@ static void ytlp_setTopOverlayVisible(id self, SEL _cmd, BOOL visible, BOOL canc
     if (overlayButtons) {
         for (UIView *button in [overlayButtons allValues]) {
             button.alpha = alpha;
+        }
+        // Reposition while visible so they sit left of the autoplay toggle
+        // instead of overlapping the Cast/CC buttons.
+        if (alpha > 0.0) {
+            @try { ytlp_positionOverlayButtons(self, overlayButtons); } @catch (__unused NSException *e) {}
         }
     }
 }

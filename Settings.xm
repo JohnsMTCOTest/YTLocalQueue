@@ -43,18 +43,27 @@ static id ytlp_makeSwitchItem(Class cls, NSString *title, NSString *desc,
                               BOOL on, YTLPSwitchBlock block) {
     SEL sel = @selector(switchItemWithTitle:titleDescription:accessibilityIdentifier:switchOn:switchBlock:settingItemId:);
     if (![cls respondsToSelector:sel]) return nil;
+    // CRASH FIX: copy the block to the heap. The caller passes a stack block;
+    // the switch item stores it and YouTube invokes it LATER (when you toggle).
+    // By then the original stack frame is gone, so an un-copied stack block is a
+    // dangling pointer -> objc_retain on a garbage address (0x8004...) the moment
+    // the switch fires. Heap-copying makes the block outlive this frame.
+    YTLPSwitchBlock heapBlock = [block copy];
     id (*send)(Class, SEL, NSString *, NSString *, NSString *, BOOL, YTLPSwitchBlock, NSInteger) =
         (id (*)(Class, SEL, NSString *, NSString *, NSString *, BOOL, YTLPSwitchBlock, NSInteger))objc_msgSend;
-    return send(cls, sel, title, desc, nil, on, block, 0);
+    return send(cls, sel, title, desc, nil, on, heapBlock, 0);
 }
 
 // Build a plain (tappable) item by sending itemWithTitle:... to the runtime class.
 static id ytlp_makeSelectItem(Class cls, NSString *title, YTLPSelectBlock block) {
     SEL sel = @selector(itemWithTitle:titleDescription:accessibilityIdentifier:detailTextBlock:selectBlock:);
     if (![cls respondsToSelector:sel]) return nil;
+    // Same heap-copy fix as the switch item: the select block is invoked later
+    // (when the row is tapped), so it must outlive this stack frame.
+    YTLPSelectBlock heapBlock = [block copy];
     id (*send)(Class, SEL, NSString *, NSString *, NSString *, YTLPDetailBlock, YTLPSelectBlock) =
         (id (*)(Class, SEL, NSString *, NSString *, NSString *, YTLPDetailBlock, YTLPSelectBlock))objc_msgSend;
-    return send(cls, sel, title, nil, nil, (YTLPDetailBlock)nil, block);
+    return send(cls, sel, title, nil, nil, (YTLPDetailBlock)nil, heapBlock);
 }
 
 static const NSInteger YTLocalQueueSection = 931; // unique tweak section id

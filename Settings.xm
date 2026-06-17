@@ -170,6 +170,22 @@ static NSArray *ytlp_buildSectionItems(void) {
         });
     if (clear) [items addObject:clear];
 
+    // ---- TEMP DIAGNOSTIC ROWS (build23-TEST) ----
+    // These read back what Tweak.xm/refresh discovered at runtime so we can
+    // debug button placement + toggle refresh without a Mac/Console. Tap a
+    // toggle, then re-open this screen to see updated values.
+    NSUserDefaults *dd = [NSUserDefaults standardUserDefaults];
+    NSArray *dbgKeys = @[@"ytlp_dbg_button", @"ytlp_dbg_array", @"ytlp_dbg_arraybtn", @"ytlp_dbg_toggle"];
+    for (NSString *k in dbgKeys) {
+        NSString *val = [dd objectForKey:k];
+        if (val.length > 0) {
+            id dbgRow = ytlp_makeSelectItem(SectionItemClass,
+                [NSString stringWithFormat:@"DBG %@", val],
+                ^BOOL(id cell, NSUInteger arg1) { return NO; });
+            if (dbgRow) [items addObject:dbgRow];
+        }
+    }
+
     // Version info (non-interactive)
     id versionItem = ytlp_makeSelectItem(SectionItemClass,
         [NSString stringWithFormat:@"Version %@", kYTLPVersion],
@@ -302,15 +318,27 @@ static void ytlp_refreshSettingsFromCell(id cell) {
     // Walk up the responder chain from the cell to find a view controller that
     // responds to reloadData (the YTSettingsViewController).
     UIResponder *r = [cell isKindOfClass:[UIResponder class]] ? (UIResponder *)cell : nil;
+    // TEMP DIAGNOSTIC: record the cell class and what the walk finds.
+    NSMutableString *dbg = [NSMutableString stringWithFormat:@"cell=%@; ",
+        cell ? NSStringFromClass([cell class]) : @"(nil)"];
     int hops = 0;
+    UIResponder *found = nil;
     while (r && hops < 30) {
         if ([r respondsToSelector:reloadSel]) {
-            ((void (*)(id, SEL))objc_msgSend)(r, reloadSel);
-            return;
+            found = r;
+            break;
         }
         r = r.nextResponder;
         hops++;
     }
+    if (found) {
+        [dbg appendFormat:@"reloadData on %@ (hop %d)", NSStringFromClass([found class]), hops];
+        [[NSUserDefaults standardUserDefaults] setObject:dbg forKey:@"ytlp_dbg_toggle"];
+        ((void (*)(id, SEL))objc_msgSend)(found, reloadSel);
+        return;
+    }
+    [dbg appendFormat:@"no reloadData responder in %d hops", hops];
+    [[NSUserDefaults standardUserDefaults] setObject:dbg forKey:@"ytlp_dbg_toggle"];
 
     // Fallback: the manager-based path.
     ytlp_refreshSettings();

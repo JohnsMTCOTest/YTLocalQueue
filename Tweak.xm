@@ -2427,9 +2427,13 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
         CGFloat w = anyBtn.bounds.size.width > 0 ? anyBtn.bounds.size.width : 24.0;
         CGFloat h = anyBtn.bounds.size.height > 0 ? anyBtn.bounds.size.height : 40.0;
         CGFloat svW = sv.bounds.size.width;
+        CGFloat svH = sv.bounds.size.height;
 
-        // Match the native top buttons' vertical position.
+        // Scan native top-right controls (gear/CC/Cast) to learn both their
+        // vertical position (topY) and the LEFTMOST x of that cluster, so in
+        // landscape we can sit just to its left.
         CGFloat topY = 12.0;
+        CGFloat clusterLeftX = svW; // leftmost native right-side control x
         for (UIView *child in sv.subviews) {
             if (child == queueBtn || child == nextBtn) continue;
             CGRect cf = child.frame;
@@ -2437,14 +2441,25 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
             BOOL onRight = cf.origin.x > svW * 0.55;
             BOOL smallish = cf.size.width > 0 && cf.size.width < 80.0 && cf.size.height < 80.0;
             if (nearTop && onRight && smallish && !child.hidden) {
-                topY = cf.origin.y;
-                break;
+                if (cf.origin.y > 0) topY = cf.origin.y;
+                if (cf.origin.x < clusterLeftX) clusterLeftX = cf.origin.x;
             }
         }
 
-        // Centered-ish top band, left of the big center play control.
         CGFloat gap = 10.0;
-        CGFloat x = svW * 0.38;
+        // Landscape (wide) vs portrait: in landscape, place our buttons just to
+        // the LEFT of the native right-side cluster so they read as part of that
+        // group. In portrait, keep the centered top spot (which looks great).
+        BOOL isLandscape = svW > svH * 1.2;
+        CGFloat x;
+        if (isLandscape && clusterLeftX < svW) {
+            // Two buttons + gaps sit immediately left of the native cluster.
+            CGFloat totalWidth = (w * 2) + gap;
+            x = clusterLeftX - gap - totalWidth;
+            if (x < svW * 0.2) x = svW * 0.2; // safety: don't run into center
+        } else {
+            x = svW * 0.38; // portrait: centered-ish top band
+        }
         if (queueBtn) {
             queueBtn.frame = CGRectMake(x, topY, w, h);
             x += w + gap;

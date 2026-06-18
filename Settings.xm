@@ -201,6 +201,15 @@ static NSArray *ytlp_buildSectionItems(void) {
         });
     if (clear) [items addObject:clear];
 
+    // TEMP: button-geometry diagnostic (container size + computed y in portrait).
+    NSString *btnDbg = [[NSUserDefaults standardUserDefaults] objectForKey:@"ytlp_dbg_btn"];
+    if (btnDbg.length > 0) {
+        id btnRow = ytlp_makeSelectItem(SectionItemClass,
+            [NSString stringWithFormat:@"DBG %@", btnDbg],
+            ^BOOL(id cell, NSUInteger arg1) { return NO; });
+        if (btnRow) [items addObject:btnRow];
+    }
+
     // TEMP: Mix diagnostic row. Shows what YouTube's native autonav endpoint
     // looks like (esp. during a Mix), so we can build the Mix takeover against
     // real class/method names. Removed once we've captured what we need.
@@ -210,6 +219,15 @@ static NSArray *ytlp_buildSectionItems(void) {
             [NSString stringWithFormat:@"DBG %@", mixDbg],
             ^BOOL(id cell, NSUInteger arg1) { return NO; });
         if (mixRow) [items addObject:mixRow];
+    }
+
+    // TEMP: playlist/Mix diagnostic row (what the player VC exposes on advance).
+    NSString *plDbg = [[NSUserDefaults standardUserDefaults] objectForKey:@"ytlp_dbg_pl"];
+    if (plDbg.length > 0) {
+        id plRow = ytlp_makeSelectItem(SectionItemClass,
+            [NSString stringWithFormat:@"DBG %@", plDbg],
+            ^BOOL(id cell, NSUInteger arg1) { return NO; });
+        if (plRow) [items addObject:plRow];
     }
 
     // Version info (non-interactive)

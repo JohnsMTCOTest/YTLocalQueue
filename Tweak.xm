@@ -2564,7 +2564,7 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
         BOOL isFullscreenLandscape = svH > 320.0;
         // In the short portrait letterbox, keep buttons just above the scrubber
         // with a small margin; in tall fullscreen, use the larger margin.
-        CGFloat bottomMargin = isFullscreenLandscape ? 86.0 : 22.0;
+        CGFloat bottomMargin = isFullscreenLandscape ? 86.0 : 12.0;
         CGFloat totalW = (w * 2) + gap;
         CGFloat x = (svW - totalW) / 2.0;
         if (x < 8.0) x = 8.0;
@@ -3181,12 +3181,4 @@ __attribute__((constructor)) static void YTLP_InstallTweakHooks(void) {
             }
             void (^strongTryInstall)(void) = tryInstallHolder;
             if (strongTryInstall) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), strongTryInstall);
-            }
-        };
-
-        // Keep a strong heap copy alive for the retry chain.
-        tryInstallHolder = [tryInstall copy];
-        tryInstallHolder();
-    });
-}
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 

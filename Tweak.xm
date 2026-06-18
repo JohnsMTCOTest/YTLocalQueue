@@ -112,6 +112,76 @@ static void ytlp_setupRemoteCommands(void);
 static void ytlp_captureVideoTap(id view, NSString *videoId, NSString *title);
 
 // ============================================================================
+// MIX DIAGNOSTIC PROBE (temporary)
+// ----------------------------------------------------------------------------
+// We have no Console access on-device, so we surface findings into NSUserDefaults
+// and display them as a row in the Local Queue settings. The goal: when a Mix is
+// playing, learn what YouTube's native "next" endpoint looks like (its class, and
+// whether it carries a playlist/Mix identifier) so we can later build the Mix
+// takeover against REAL class/method names instead of guessing. Runs at most once
+// per second and only records, never alters behavior.
+// ============================================================================
+static NSTimeInterval ytlp_lastMixProbeTime = 0;
+
+static void ytlp_recordMixDiag(NSString *info) {
+    if (info.length == 0) return;
+    @try {
+        [[NSUserDefaults standardUserDefaults] setObject:info forKey:@"ytlp_dbg_mix"];
+    } @catch (__unused NSException *e) {}
+}
+
+// Introspect an endpoint/command object for playlist/Mix clues. Safe against any
+// object shape -- everything guarded, only reads, never throws out.
+static void ytlp_probeEndpointForMix(id endpoint, NSString *tag) {
+    @try {
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+        if (now - ytlp_lastMixProbeTime < 1.0) return; // throttle
+        ytlp_lastMixProbeTime = now;
+
+        if (!endpoint) {
+            ytlp_recordMixDiag([NSString stringWithFormat:@"%@: nil endpoint", tag]);
+            return;
+        }
+
+        NSMutableString *out = [NSMutableString string];
+        [out appendFormat:@"%@ cls=%@", tag, NSStringFromClass([endpoint class])];
+
+        // Probe a set of likely selectors that would reveal playlist/Mix context.
+        // We don't know which exist in this build -- that's the point of probing.
+        NSArray<NSString *> *sels = @[
+            @"playlistId", @"playlistID", @"playlist",
+            @"mixId", @"mixID", @"isMix",
+            @"videoId", @"videoID",
+            @"watchEndpoint", @"navigationEndpoint",
+            @"index", @"playlistIndex"
+        ];
+        for (NSString *selName in sels) {
+            SEL sel = NSSelectorFromString(selName);
+            if ([endpoint respondsToSelector:sel]) {
+                @try {
+                    id val = ((id (*)(id, SEL))objc_msgSend)(endpoint, sel);
+                    if (val) {
+                        NSString *desc;
+                        if ([val isKindOfClass:[NSString class]]) {
+                            desc = (NSString *)val;
+                        } else if ([val isKindOfClass:[NSNumber class]]) {
+                            desc = [(NSNumber *)val stringValue];
+                        } else {
+                            desc = NSStringFromClass([val class]);
+                        }
+                        if (desc.length > 24) desc = [desc substringToIndex:24];
+                        [out appendFormat:@" %@=%@", selName, desc];
+                    }
+                } @catch (__unused NSException *e) {}
+            }
+        }
+
+        ytlp_recordMixDiag(out);
+    } @catch (__unused NSException *e) {}
+}
+
+
+// ============================================================================
 // SAFE KVC HELPER
 // ============================================================================
 // CRASH FIX: Probing arbitrary views with valueForKey: for keys like "data" /
@@ -2191,7 +2261,12 @@ static id ytlp_autonavEndpoint(id self, SEL _cmd) {
         id endpoint = ytlp_createQueueEndpoint(videoId);
         if (endpoint) return endpoint;
     }
-    return origAutonavEndpoint ? origAutonavEndpoint(self, _cmd) : nil;
+    id orig = origAutonavEndpoint ? origAutonavEndpoint(self, _cmd) : nil;
+    // DIAGNOSTIC: when our queue isn't overriding, inspect YouTube's own next
+    // endpoint. During a Mix this reveals the Mix's next-video object + any
+    // playlist/Mix identifiers, which we need to build the Mix takeover.
+    ytlp_probeEndpointForMix(orig, @"autonavEnd");
+    return orig;
 }
 
 // Intercept nextEndpointForAutonav - this is what YouTube uses to get the next video
@@ -2431,30 +2506,33 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
         if (anyBtn.hidden || anyBtn.alpha <= 0.01) return;
 
         CGFloat svW = sv.bounds.size.width;
-        if (svW <= 100.0) return; // not laid out yet
+        CGFloat svH = sv.bounds.size.height;
+        if (svW <= 100.0 || svH <= 100.0) return; // not laid out yet
 
         CGFloat w = anyBtn.bounds.size.width  > 0 ? anyBtn.bounds.size.width  : 24.0;
         CGFloat h = anyBtn.bounds.size.height > 0 ? anyBtn.bounds.size.height : 40.0;
-        CGFloat gap = 12.0;
+        CGFloat gap = 16.0;
 
-        // Fixed placement: top band. Offset in from the RIGHT edge far enough to
-        // clear YouTube's native control cluster (autoplay/cast/CC/gear), which
-        // occupies the top-right. We reserve a clearance for that cluster and put
-        // our two buttons just to the LEFT of it. Computed only from our own
-        // container width, so it's stable in both orientations and during the
-        // settled state (we don't run mid-rotation thanks to the early-out).
-        CGFloat topY = 12.0;
-        CGFloat nativeClusterClearance = 200.0; // approx width of native cluster
+        // Fixed placement: BOTTOM-CENTER, sitting safely above YouTube's scrubber
+        // and bottom control row. We compute from our own container's bounds:
+        //  - X: horizontally centered (two buttons + gap), so it shares space with
+        //    nothing on the sides.
+        //  - Y: anchored a fixed margin up from the BOTTOM edge, clearing the
+        //    scrubber/timeline and bottom buttons. This area is empty in both
+        //    orientations, so there's nothing to overlap.
+        CGFloat bottomMargin = 86.0;  // clearance above scrubber + bottom row
         CGFloat totalW = (w * 2) + gap;
-        CGFloat x = svW - nativeClusterClearance - totalW;
-        if (x < 8.0) x = 8.0; // never run off the left edge on tiny widths
+        CGFloat x = (svW - totalW) / 2.0;
+        if (x < 8.0) x = 8.0;
+        CGFloat y = svH - bottomMargin - h;
+        if (y < 8.0) y = 8.0; // safety on very short containers
 
         if (queueBtn) {
-            queueBtn.frame = CGRectMake(x, topY, w, h);
+            queueBtn.frame = CGRectMake(x, y, w, h);
             x += w + gap;
         }
         if (nextBtn) {
-            nextBtn.frame = CGRectMake(x, topY, w, h);
+            nextBtn.frame = CGRectMake(x, y, w, h);
         }
     } @catch (__unused NSException *e) {}
 }

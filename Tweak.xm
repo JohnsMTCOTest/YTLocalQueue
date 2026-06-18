@@ -3181,4 +3181,17 @@ __attribute__((constructor)) static void YTLP_InstallTweakHooks(void) {
             }
             void (^strongTryInstall)(void) = tryInstallHolder;
             if (strongTryInstall) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 
+                dispatch_time_t when = dispatch_time(
+                    DISPATCH_TIME_NOW,
+                    (int64_t)(0.5 * NSEC_PER_SEC));
+                dispatch_after(when,
+                    dispatch_get_main_queue(),
+                    strongTryInstall);
+            }
+        };
+
+        // Keep a strong heap copy alive for the retry chain.
+        tryInstallHolder = [tryInstall copy];
+        tryInstallHolder();
+    });
+}

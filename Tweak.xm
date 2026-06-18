@@ -86,6 +86,14 @@ static BOOL ytlp_advanceInProgress = NO;
 static BOOL ytlp_endDetected = NO;
 static BOOL ytlp_userInitiated = NO;
 
+// Playlist / Mix context (populated safely from setWatchNextResponse: by reading
+// ONLY the playlistId string -- never the panel's scalar/array accessors, which
+// crash). A Mix/radio has an "RD"-prefixed playlist ID; regular playlists use
+// other prefixes (PL/OL/FL/UU/LL...). We use this to know when the queue should
+// take over from an auto-continuing playlist/Mix.
+static NSString *ytlp_activePlaylistId = nil;
+static BOOL ytlp_activeContextIsMix = NO;
+
 static BOOL YTLP_AutoAdvanceEnabled(void) {
     return [[NSUserDefaults standardUserDefaults] boolForKey:@"ytlp_queue_auto_advance_enabled"];
 }
@@ -1586,7 +1594,46 @@ static void ytlp_probeWatchNextResponse(id response) {
 static void ytlp_setWatchNextResponse(id self, SEL _cmd, id response) {
     // DIAGNOSTIC ONLY: observe the response, then pass through unchanged.
     ytlp_probeWatchNextResponse(response);
+
+    // SAFE playlist/Mix detection: read ONLY the playlistId string accessor,
+    // and only if it exists. We rigorously validate the result is an NSString
+    // before using it (a non-object scalar return would otherwise crash on
+    // objc_retain -- the bug that crashed the panel drill-down). We never touch
+    // the panel's index/contents accessors.
+    @try {
+        SEL pidSel = NSSelectorFromString(@"playlistId");
+        if (response && [response respondsToSelector:pidSel]) {
+            id pid = ((id (*)(id, SEL))objc_msgSend)(response, pidSel);
+            if ([pid isKindOfClass:[NSString class]] && [(NSString *)pid length] > 0) {
+                ytlp_activePlaylistId = [pid copy];
+                ytlp_activeContextIsMix = [(NSString *)pid hasPrefix:@"RD"];
+            } else {
+                ytlp_activePlaylistId = nil;
+                ytlp_activeContextIsMix = NO;
+            }
+        } else {
+            ytlp_activePlaylistId = nil;
+            ytlp_activeContextIsMix = NO;
+        }
+    } @catch (__unused NSException *e) {
+        ytlp_activePlaylistId = nil;
+        ytlp_activeContextIsMix = NO;
+    }
+
     if (origSetWatchNextResponse) origSetWatchNextResponse(self, _cmd, response);
+
+    // DIAGNOSTIC: record what we detected (read-only string), so we can confirm
+    // detection works before wiring any takeover behavior.
+    @try {
+        NSString *d = ytlp_activePlaylistId.length > 0
+            ? [NSString stringWithFormat:@"ctx pid=%@ mix=%d",
+               (ytlp_activePlaylistId.length > 14
+                ? [ytlp_activePlaylistId substringToIndex:14]
+                : ytlp_activePlaylistId),
+               ytlp_activeContextIsMix ? 1 : 0]
+            : @"ctx none";
+        [[NSUserDefaults standardUserDefaults] setObject:d forKey:@"ytlp_dbg_ctx"];
+    } @catch (__unused NSException *e) {}
 }
 
 static void ytlp_playerViewDidAppear(id self, SEL _cmd, BOOL animated) {

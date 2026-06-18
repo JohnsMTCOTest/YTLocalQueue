@@ -2514,13 +2514,16 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
         CGFloat gap = 16.0;
 
         // Fixed placement: BOTTOM-CENTER, sitting safely above YouTube's scrubber
-        // and bottom control row. We compute from our own container's bounds:
-        //  - X: horizontally centered (two buttons + gap), so it shares space with
-        //    nothing on the sides.
-        //  - Y: anchored a fixed margin up from the BOTTOM edge, clearing the
-        //    scrubber/timeline and bottom buttons. This area is empty in both
-        //    orientations, so there's nothing to overlap.
-        CGFloat bottomMargin = 86.0;  // clearance above scrubber + bottom row
+        // and bottom control row. Centered horizontally; anchored up from the
+        // bottom edge. We pick the bottom margin based on the container's own
+        // aspect: in LANDSCAPE the player container is tall (full screen) and the
+        // scrubber/bottom row is taller, so we need a larger margin; in PORTRAIT
+        // the player is a short 16:9 letterbox, so a large margin would push the
+        // buttons into the center (onto the play/pause controls). Reading the
+        // container's own width vs height is safe here because we only run when
+        // controls are visible and geometry is settled (we early-out otherwise).
+        BOOL containerLandscape = svW > svH;
+        CGFloat bottomMargin = containerLandscape ? 86.0 : 44.0;
         CGFloat totalW = (w * 2) + gap;
         CGFloat x = (svW - totalW) / 2.0;
         if (x < 8.0) x = 8.0;

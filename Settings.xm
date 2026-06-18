@@ -201,6 +201,17 @@ static NSArray *ytlp_buildSectionItems(void) {
         });
     if (clear) [items addObject:clear];
 
+    // TEMP: Mix diagnostic row. Shows what YouTube's native autonav endpoint
+    // looks like (esp. during a Mix), so we can build the Mix takeover against
+    // real class/method names. Removed once we've captured what we need.
+    NSString *mixDbg = [[NSUserDefaults standardUserDefaults] objectForKey:@"ytlp_dbg_mix"];
+    if (mixDbg.length > 0) {
+        id mixRow = ytlp_makeSelectItem(SectionItemClass,
+            [NSString stringWithFormat:@"DBG %@", mixDbg],
+            ^BOOL(id cell, NSUInteger arg1) { return NO; });
+        if (mixRow) [items addObject:mixRow];
+    }
+
     // Version info (non-interactive)
     id versionItem = ytlp_makeSelectItem(SectionItemClass,
         [NSString stringWithFormat:@"Version %@", kYTLPVersion],

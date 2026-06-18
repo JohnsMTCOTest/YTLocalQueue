@@ -111,75 +111,6 @@ static void ytlp_updateAutoplayState(void);
 static void ytlp_setupRemoteCommands(void);
 static void ytlp_captureVideoTap(id view, NSString *videoId, NSString *title);
 
-// ============================================================================
-// MIX DIAGNOSTIC PROBE (temporary)
-// ----------------------------------------------------------------------------
-// We have no Console access on-device, so we surface findings into NSUserDefaults
-// and display them as a row in the Local Queue settings. The goal: when a Mix is
-// playing, learn what YouTube's native "next" endpoint looks like (its class, and
-// whether it carries a playlist/Mix identifier) so we can later build the Mix
-// takeover against REAL class/method names instead of guessing. Runs at most once
-// per second and only records, never alters behavior.
-// ============================================================================
-static NSTimeInterval ytlp_lastMixProbeTime = 0;
-
-static void ytlp_recordMixDiag(NSString *info) {
-    if (info.length == 0) return;
-    @try {
-        [[NSUserDefaults standardUserDefaults] setObject:info forKey:@"ytlp_dbg_mix"];
-    } @catch (__unused NSException *e) {}
-}
-
-// Introspect an endpoint/command object for playlist/Mix clues. Safe against any
-// object shape -- everything guarded, only reads, never throws out.
-static void ytlp_probeEndpointForMix(id endpoint, NSString *tag) {
-    @try {
-        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-        if (now - ytlp_lastMixProbeTime < 1.0) return; // throttle
-        ytlp_lastMixProbeTime = now;
-
-        if (!endpoint) {
-            ytlp_recordMixDiag([NSString stringWithFormat:@"%@: nil endpoint", tag]);
-            return;
-        }
-
-        NSMutableString *out = [NSMutableString string];
-        [out appendFormat:@"%@ cls=%@", tag, NSStringFromClass([endpoint class])];
-
-        // Probe a set of likely selectors that would reveal playlist/Mix context.
-        // We don't know which exist in this build -- that's the point of probing.
-        NSArray<NSString *> *sels = @[
-            @"playlistId", @"playlistID", @"playlist",
-            @"mixId", @"mixID", @"isMix",
-            @"videoId", @"videoID",
-            @"watchEndpoint", @"navigationEndpoint",
-            @"index", @"playlistIndex"
-        ];
-        for (NSString *selName in sels) {
-            SEL sel = NSSelectorFromString(selName);
-            if ([endpoint respondsToSelector:sel]) {
-                @try {
-                    id val = ((id (*)(id, SEL))objc_msgSend)(endpoint, sel);
-                    if (val) {
-                        NSString *desc;
-                        if ([val isKindOfClass:[NSString class]]) {
-                            desc = (NSString *)val;
-                        } else if ([val isKindOfClass:[NSNumber class]]) {
-                            desc = [(NSNumber *)val stringValue];
-                        } else {
-                            desc = NSStringFromClass([val class]);
-                        }
-                        if (desc.length > 24) desc = [desc substringToIndex:24];
-                        [out appendFormat:@" %@=%@", selName, desc];
-                    }
-                } @catch (__unused NSException *e) {}
-            }
-        }
-
-        ytlp_recordMixDiag(out);
-    } @catch (__unused NSException *e) {}
-}
-
 // Read-only probe of the player VC for PLAYLIST / MIX context. Records what we
 // find (class names, playlist/Mix IDs, indices, available selectors) to a
 // settings-visible diagnostic. Never alters playback. Throttled.
@@ -1593,13 +1524,75 @@ static void ytlp_potentiallyMutatedSingleVideoTimeDidChange(id self, SEL _cmd, i
     ytlp_handleVideoTimeChange(self, videoTime);
 }
 
+// Read-only probe of the WatchNextResponse object -- this is what carries the
+// playlist/Mix "what plays next" data. We introspect it for playlist/Mix
+// identifiers and next-video info, then ALWAYS call the original (never alter
+// playback). This is how we learn the structure to build the queue takeover.
+//
+// ACCUMULATING: setWatchNextResponse: fires for EVERY video (plain, playlist,
+// Mix). Last-write-wins would just show the latest, and we couldn't compare a
+// playlist vs a Mix. So we keep a set of DISTINCT signatures and only record
+// ones that look playlist/Mix-related (plain videos are skipped as noise). The
+// row then shows playlist AND Mix together regardless of test order.
+typedef void (*SetWatchNextResponseIMP)(id, SEL, id);
+static SetWatchNextResponseIMP origSetWatchNextResponse = NULL;
+static NSMutableArray<NSString *> *ytlp_wnrSeen = nil;
+
+static void ytlp_probeWatchNextResponse(id response) {
+    @try {
+        if (!response) { return; }
+
+        NSString *cls = NSStringFromClass([response class]);
+
+        // Build a signature: class + any playlist/mix/autoplay method names.
+        NSMutableString *sig = [NSMutableString string];
+        BOOL interesting = NO;
+        @try {
+            unsigned int count = 0;
+            Method *methods = class_copyMethodList(object_getClass(response), &count);
+            int hits = 0;
+            for (unsigned int i = 0; i < count && hits < 4; i++) {
+                NSString *name = NSStringFromSelector(method_getName(methods[i]));
+                NSString *low = [name lowercaseString];
+                if ([low containsString:@"playlist"] || [low containsString:@"mix"] ||
+                    [low containsString:@"autoplay"] || [low containsString:@"autonav"]) {
+                    [sig appendFormat:@" %@", name];
+                    hits++;
+                    interesting = YES;
+                }
+            }
+            if (methods) free(methods);
+        } @catch (__unused NSException *e) {}
+
+        // Skip plain-video responses (no playlist/mix hints) to avoid noise.
+        if (!interesting) return;
+
+        NSString *full = [NSString stringWithFormat:@"%@%@", cls, sig];
+
+        if (!ytlp_wnrSeen) ytlp_wnrSeen = [NSMutableArray array];
+        // Dedupe: only add genuinely new signatures.
+        if (![ytlp_wnrSeen containsObject:full]) {
+            [ytlp_wnrSeen addObject:full];
+            if (ytlp_wnrSeen.count > 4) [ytlp_wnrSeen removeObjectAtIndex:0];
+            NSString *joined = [ytlp_wnrSeen componentsJoinedByString:@" || "];
+            @try { [[NSUserDefaults standardUserDefaults] setObject:joined forKey:@"ytlp_dbg_wnr"]; } @catch (__unused NSException *e) {}
+        }
+    } @catch (__unused NSException *e) {}
+}
+
+static void ytlp_setWatchNextResponse(id self, SEL _cmd, id response) {
+    // DIAGNOSTIC ONLY: observe the response, then pass through unchanged.
+    ytlp_probeWatchNextResponse(response);
+    if (origSetWatchNextResponse) origSetWatchNextResponse(self, _cmd, response);
+}
+
 static void ytlp_playerViewDidAppear(id self, SEL _cmd, BOOL animated) {
     if (origPlayerViewDidAppear) origPlayerViewDidAppear(self, _cmd, animated);
     ytlp_currentPlayerVC = self;
 
     // DIAGNOSTIC: probe for playlist/Mix context (read-only).
     ytlp_probePlayerForPlaylist(self);
-    
+        
     // Store reference in manager so LocalQueueViewController can access it
     [[YTLPLocalQueueManager shared] setCurrentPlayerViewController:self];
     
@@ -2306,10 +2299,6 @@ static id ytlp_autonavEndpoint(id self, SEL _cmd) {
         if (endpoint) return endpoint;
     }
     id orig = origAutonavEndpoint ? origAutonavEndpoint(self, _cmd) : nil;
-    // DIAGNOSTIC: when our queue isn't overriding, inspect YouTube's own next
-    // endpoint. During a Mix this reveals the Mix's next-video object + any
-    // playlist/Mix identifiers, which we need to build the Mix takeover.
-    ytlp_probeEndpointForMix(orig, @"autonavEnd");
     return orig;
 }
 
@@ -2575,7 +2564,7 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
         BOOL isFullscreenLandscape = svH > 320.0;
         // In the short portrait letterbox, keep buttons just above the scrubber
         // with a small margin; in tall fullscreen, use the larger margin.
-        CGFloat bottomMargin = isFullscreenLandscape ? 86.0 : 40.0;
+        CGFloat bottomMargin = isFullscreenLandscape ? 86.0 : 22.0;
         CGFloat totalW = (w * 2) + gap;
         CGFloat x = (svW - totalW) / 2.0;
         if (x < 8.0) x = 8.0;
@@ -2774,6 +2763,14 @@ __attribute__((constructor)) static void YTLP_InstallTweakHooks(void) {
                 if (m && !origPlayerViewDidAppear) {
                     origPlayerViewDidAppear = (PlayerViewDidAppearIMP)method_getImplementation(m);
                     method_setImplementation(m, (IMP)ytlp_playerViewDidAppear);
+                }
+
+                // DIAGNOSTIC: hook setWatchNextResponse: to learn the playlist/Mix
+                // response structure (read-only; always calls original).
+                Method wnrMethod = class_getInstanceMethod(PlayerVC, @selector(setWatchNextResponse:));
+                if (wnrMethod && !origSetWatchNextResponse) {
+                    origSetWatchNextResponse = (SetWatchNextResponseIMP)method_getImplementation(wnrMethod);
+                    method_setImplementation(wnrMethod, (IMP)ytlp_setWatchNextResponse);
                 }
                 
                 // Hook seekToTime: to detect loop seeks (when YouTube seeks to 0)

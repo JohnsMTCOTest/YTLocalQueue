@@ -201,16 +201,6 @@ static NSArray *ytlp_buildSectionItems(void) {
         });
     if (clear) [items addObject:clear];
 
-    // TEMP: playlist-panel drill-down (position/index/contents of the playlist
-    // or Mix). This is the data needed to preserve playlist position on takeover.
-    NSString *panelDbg = [[NSUserDefaults standardUserDefaults] objectForKey:@"ytlp_dbg_panel"];
-    if (panelDbg.length > 0) {
-        id panelRow = ytlp_makeSelectItem(SectionItemClass,
-            [NSString stringWithFormat:@"DBG %@", panelDbg],
-            ^BOOL(id cell, NSUInteger arg1) { return NO; });
-        if (panelRow) [items addObject:panelRow];
-    }
-
     // TEMP: watch-next-response diagnostic (playlist/Mix response structure).
     NSString *wnrDbg = [[NSUserDefaults standardUserDefaults] objectForKey:@"ytlp_dbg_wnr"];
     if (wnrDbg.length > 0) {

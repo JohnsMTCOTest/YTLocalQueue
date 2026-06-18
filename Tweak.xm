@@ -1567,57 +1567,6 @@ static void ytlp_probeWatchNextResponse(id response) {
         // Skip plain-video responses (no playlist/mix hints) to avoid noise.
         if (!interesting) return;
 
-        // DRILL DOWN: try to reach the playlist panel renderer (the list of
-        // upcoming videos + current position) and record ITS structure. This is
-        // what we need to read/preserve the playlist's position for the takeover.
-        @try {
-            NSArray<NSString *> *panelSels = @[
-                @"singleColumnPlaylistPanelRenderer",
-                @"playlistPanelRenderer", @"playlist", @"contents"
-            ];
-            for (NSString *psName in panelSels) {
-                SEL ps = NSSelectorFromString(psName);
-                if ([response respondsToSelector:ps]) {
-                    id panel = ((id (*)(id, SEL))objc_msgSend)(response, ps);
-                    if (panel) {
-                        NSMutableString *pinfo = [NSMutableString string];
-                        [pinfo appendFormat:@"PANEL=%@", NSStringFromClass([panel class])];
-                        // Look for index/position/title/contents accessors.
-                        NSArray<NSString *> *want = @[
-                            @"currentIndex", @"selectedIndex", @"startIndex",
-                            @"index", @"playlistId", @"playlistID", @"title",
-                            @"contents", @"videos", @"numVideos", @"totalVideos"
-                        ];
-                        for (NSString *wName in want) {
-                            SEL ws = NSSelectorFromString(wName);
-                            if ([panel respondsToSelector:ws]) {
-                                @try {
-                                    id v = ((id (*)(id, SEL))objc_msgSend)(panel, ws);
-                                    NSString *d = nil;
-                                    if ([v isKindOfClass:[NSString class]]) d = v;
-                                    else if ([v isKindOfClass:[NSNumber class]]) d = [v stringValue];
-                                    else if ([v isKindOfClass:[NSArray class]]) {
-                                        unsigned long n = [(NSArray *)v count];
-                                        d = [NSString stringWithFormat:@"arr[%lu]", n];
-                                    }
-                                    else if (v) d = NSStringFromClass([v class]);
-                                    if (d) {
-                                        if (d.length > 16) d = [d substringToIndex:16];
-                                        [pinfo appendFormat:@" %@=%@", wName, d];
-                                    }
-                                } @catch (__unused NSException *e) {}
-                            }
-                        }
-                        @try {
-                            [[NSUserDefaults standardUserDefaults]
-                                setObject:pinfo forKey:@"ytlp_dbg_panel"];
-                        } @catch (__unused NSException *e) {}
-                        break;
-                    }
-                }
-            }
-        } @catch (__unused NSException *e) {}
-
         NSString *full = [NSString stringWithFormat:@"%@%@", cls, sig];
 
         if (!ytlp_wnrSeen) ytlp_wnrSeen = [NSMutableArray array];

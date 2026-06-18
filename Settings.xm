@@ -201,13 +201,14 @@ static NSArray *ytlp_buildSectionItems(void) {
         });
     if (clear) [items addObject:clear];
 
-    // TEMP: button-geometry diagnostic (container size + computed y in portrait).
-    NSString *btnDbg = [[NSUserDefaults standardUserDefaults] objectForKey:@"ytlp_dbg_btn"];
-    if (btnDbg.length > 0) {
-        id btnRow = ytlp_makeSelectItem(SectionItemClass,
-            [NSString stringWithFormat:@"DBG %@", btnDbg],
+    // TEMP: playlist-panel drill-down (position/index/contents of the playlist
+    // or Mix). This is the data needed to preserve playlist position on takeover.
+    NSString *panelDbg = [[NSUserDefaults standardUserDefaults] objectForKey:@"ytlp_dbg_panel"];
+    if (panelDbg.length > 0) {
+        id panelRow = ytlp_makeSelectItem(SectionItemClass,
+            [NSString stringWithFormat:@"DBG %@", panelDbg],
             ^BOOL(id cell, NSUInteger arg1) { return NO; });
-        if (btnRow) [items addObject:btnRow];
+        if (panelRow) [items addObject:panelRow];
     }
 
     // TEMP: watch-next-response diagnostic (playlist/Mix response structure).

@@ -2407,14 +2407,14 @@ static NSMutableArray *ytlp_topButtonControls(id self, SEL _cmd) {
 // Position our two buttons within the controls overlay. Called from
 // setTopOverlayVisible and layoutSubviews.
 //
-// DESIGN: Keep this DEAD SIMPLE. Earlier versions walked YouTube's view tree
-// every layout pass to anchor beside the native controls; that scanning was
-// expensive (lag) and fragile during rotation (buttons flew into the comments
-// area / black bars). We now compute a FIXED position purely from our own
-// container's bounds -- no tree-walking, no cross-view coordinate conversion,
-// no caching, no orientation-specific anchoring. This is cheap enough to run
-// every pass and cannot misbehave during transitions because it only reads the
-// container's current size.
+// DESIGN: Keep this DEAD SIMPLE and CHEAP. We compute a fixed position from our
+// own container's bounds -- no tree-walking, no coordinate conversion, no
+// caching. Critically, we BAIL EARLY when our buttons are hidden (controls not
+// showing). During an orientation change the controls are hidden and YouTube is
+// running its own rotation animation; doing any work in our layoutSubviews hook
+// then steals frame time and makes the whole player rotate janky. Skipping when
+// hidden keeps rotation smooth and means we only position when it actually
+// matters (controls visible, geometry already settled).
 static void ytlp_layoutOverlayButtons(id controlsView) {
     NSDictionary *overlayButtons = ytlp_getOverlayButtons(controlsView);
     if (!overlayButtons.count) return;
@@ -2425,6 +2425,11 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
         UIView *sv = anyBtn.superview;
         if (!sv) return;
 
+        // EARLY-OUT: if our buttons aren't visible, do nothing. This is the
+        // common case during rotation (controls hidden) and keeps us out of
+        // YouTube's way so the player animates smoothly.
+        if (anyBtn.hidden || anyBtn.alpha <= 0.01) return;
+
         CGFloat svW = sv.bounds.size.width;
         if (svW <= 100.0) return; // not laid out yet
 
@@ -2432,15 +2437,16 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
         CGFloat h = anyBtn.bounds.size.height > 0 ? anyBtn.bounds.size.height : 40.0;
         CGFloat gap = 12.0;
 
-        // Fixed placement: top band, offset in from the RIGHT edge of our own
-        // container. The two buttons sit side by side. Using the container's
-        // own width means this is correct in both portrait and landscape
-        // without any orientation detection -- YouTube sizes the container for
-        // whatever orientation is active, so reading svW is always right.
+        // Fixed placement: top band. Offset in from the RIGHT edge far enough to
+        // clear YouTube's native control cluster (autoplay/cast/CC/gear), which
+        // occupies the top-right. We reserve a clearance for that cluster and put
+        // our two buttons just to the LEFT of it. Computed only from our own
+        // container width, so it's stable in both orientations and during the
+        // settled state (we don't run mid-rotation thanks to the early-out).
         CGFloat topY = 12.0;
-        CGFloat rightInset = 12.0;
+        CGFloat nativeClusterClearance = 200.0; // approx width of native cluster
         CGFloat totalW = (w * 2) + gap;
-        CGFloat x = svW - rightInset - totalW;
+        CGFloat x = svW - nativeClusterClearance - totalW;
         if (x < 8.0) x = 8.0; // never run off the left edge on tiny widths
 
         if (queueBtn) {

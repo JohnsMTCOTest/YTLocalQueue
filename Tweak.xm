@@ -194,34 +194,29 @@ static void ytlp_probePlayerForPlaylist(id playerVC) {
 
         NSMutableString *out = [NSMutableString string];
 
-        // Candidate selectors on the player VC (or reachable objects) that would
-        // indicate playlist/Mix membership and position. We only call ones that
-        // exist, and only stringify safe return types.
-        NSArray<NSString *> *pvcSels = @[
-            @"playlistID", @"playlistId", @"playlist",
-            @"currentPlaylistID", @"watchNextResponse",
-            @"playlistPanel", @"hasPlaylist", @"isPlaylist",
-            @"contentVideoID", @"currentVideoID"
-        ];
-        for (NSString *selName in pvcSels) {
-            SEL sel = NSSelectorFromString(selName);
-            if ([playerVC respondsToSelector:sel]) {
-                @try {
-                    id val = ((id (*)(id, SEL))objc_msgSend)(playerVC, sel);
-                    NSString *desc = nil;
-                    if ([val isKindOfClass:[NSString class]]) desc = val;
-                    else if ([val isKindOfClass:[NSNumber class]]) desc = [val stringValue];
-                    else if (val) desc = NSStringFromClass([val class]);
-                    if (desc) {
-                        if (desc.length > 20) desc = [desc substringToIndex:20];
-                        [out appendFormat:@"%@=%@ ", selName, desc];
-                    }
-                } @catch (__unused NSException *e) {}
+        // Enumerate the player VC's OWN methods and surface any whose name hints
+        // at playlist/mix/queue/autonav context. This stops us guessing selector
+        // names -- we see exactly what's available on this build.
+        @try {
+            unsigned int count = 0;
+            Method *methods = class_copyMethodList(object_getClass(playerVC), &count);
+            int hits = 0;
+            for (unsigned int i = 0; i < count && hits < 6; i++) {
+                SEL s = method_getName(methods[i]);
+                NSString *name = NSStringFromSelector(s);
+                NSString *low = [name lowercaseString];
+                if (([low containsString:@"playlist"] || [low containsString:@"mix"] ||
+                     [low containsString:@"autonav"] || [low containsString:@"watchnext"]) &&
+                    ![low containsString:@"setcurrentvideo"]) {
+                    [out appendFormat:@"%@ ", name];
+                    hits++;
+                }
             }
-        }
+            if (methods) free(methods);
+        } @catch (__unused NSException *e) {}
 
         if (out.length == 0) {
-            [out appendFormat:@"pvc=%@ (no playlist sels)", NSStringFromClass([playerVC class])];
+            [out appendFormat:@"pvc=%@ noPLsel", NSStringFromClass([playerVC class])];
         }
 
         @try { [[NSUserDefaults standardUserDefaults] setObject:out forKey:@"ytlp_dbg_pl"]; } @catch (__unused NSException *e) {}
@@ -2571,8 +2566,16 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
         // buttons into the center (onto the play/pause controls). Reading the
         // container's own width vs height is safe here because we only run when
         // controls are visible and geometry is settled (we early-out otherwise).
-        BOOL containerLandscape = svW > svH;
-        CGFloat bottomMargin = containerLandscape ? 86.0 : 44.0;
+        // Distinguish portrait vs landscape by the container's ABSOLUTE HEIGHT,
+        // not its aspect. The portrait player is a 16:9 letterbox that is WIDER
+        // than tall (e.g. 422x238), so an aspect check (w>h) wrongly reports
+        // "landscape" in portrait. But the portrait container is always SHORT
+        // (~240pt) whereas the fullscreen landscape container is TALL (the whole
+        // screen, ~390pt+). So height cleanly separates them.
+        BOOL isFullscreenLandscape = svH > 320.0;
+        // In the short portrait letterbox, keep buttons just above the scrubber
+        // with a small margin; in tall fullscreen, use the larger margin.
+        CGFloat bottomMargin = isFullscreenLandscape ? 86.0 : 40.0;
         CGFloat totalW = (w * 2) + gap;
         CGFloat x = (svW - totalW) / 2.0;
         if (x < 8.0) x = 8.0;
@@ -2586,8 +2589,8 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
             NSTimeInterval nowB = [[NSDate date] timeIntervalSince1970];
             if (nowB - lastBtnDiag > 1.0) {
                 lastBtnDiag = nowB;
-                NSString *bi = [NSString stringWithFormat:@"sv=%.0fx%.0f land=%d y=%.0f",
-                                svW, svH, containerLandscape ? 1 : 0, y];
+                NSString *bi = [NSString stringWithFormat:@"sv=%.0fx%.0f fs=%d y=%.0f",
+                                svW, svH, isFullscreenLandscape ? 1 : 0, y];
                 @try { [[NSUserDefaults standardUserDefaults] setObject:bi forKey:@"ytlp_dbg_btn"]; } @catch (__unused NSException *e) {}
             }
         }

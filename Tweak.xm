@@ -180,9 +180,55 @@ static void ytlp_probeEndpointForMix(id endpoint, NSString *tag) {
     } @catch (__unused NSException *e) {}
 }
 
+// Read-only probe of the player VC for PLAYLIST / MIX context. Records what we
+// find (class names, playlist/Mix IDs, indices, available selectors) to a
+// settings-visible diagnostic. Never alters playback. Throttled.
+static NSTimeInterval ytlp_lastPlaylistProbeTime = 0;
 
-// ============================================================================
-// SAFE KVC HELPER
+static void ytlp_probePlayerForPlaylist(id playerVC) {
+    @try {
+        if (!playerVC) return;
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+        if (now - ytlp_lastPlaylistProbeTime < 1.5) return; // throttle
+        ytlp_lastPlaylistProbeTime = now;
+
+        NSMutableString *out = [NSMutableString string];
+
+        // Candidate selectors on the player VC (or reachable objects) that would
+        // indicate playlist/Mix membership and position. We only call ones that
+        // exist, and only stringify safe return types.
+        NSArray<NSString *> *pvcSels = @[
+            @"playlistID", @"playlistId", @"playlist",
+            @"currentPlaylistID", @"watchNextResponse",
+            @"playlistPanel", @"hasPlaylist", @"isPlaylist",
+            @"contentVideoID", @"currentVideoID"
+        ];
+        for (NSString *selName in pvcSels) {
+            SEL sel = NSSelectorFromString(selName);
+            if ([playerVC respondsToSelector:sel]) {
+                @try {
+                    id val = ((id (*)(id, SEL))objc_msgSend)(playerVC, sel);
+                    NSString *desc = nil;
+                    if ([val isKindOfClass:[NSString class]]) desc = val;
+                    else if ([val isKindOfClass:[NSNumber class]]) desc = [val stringValue];
+                    else if (val) desc = NSStringFromClass([val class]);
+                    if (desc) {
+                        if (desc.length > 20) desc = [desc substringToIndex:20];
+                        [out appendFormat:@"%@=%@ ", selName, desc];
+                    }
+                } @catch (__unused NSException *e) {}
+            }
+        }
+
+        if (out.length == 0) {
+            [out appendFormat:@"pvc=%@ (no playlist sels)", NSStringFromClass([playerVC class])];
+        }
+
+        @try { [[NSUserDefaults standardUserDefaults] setObject:out forKey:@"ytlp_dbg_pl"]; } @catch (__unused NSException *e) {}
+    } @catch (__unused NSException *e) {}
+}
+
+
 // ============================================================================
 // CRASH FIX: Probing arbitrary views with valueForKey: for keys like "data" /
 // "entry" can return a non-object scalar (a boxed BOOL, a struct, or a raw
@@ -1555,6 +1601,9 @@ static void ytlp_potentiallyMutatedSingleVideoTimeDidChange(id self, SEL _cmd, i
 static void ytlp_playerViewDidAppear(id self, SEL _cmd, BOOL animated) {
     if (origPlayerViewDidAppear) origPlayerViewDidAppear(self, _cmd, animated);
     ytlp_currentPlayerVC = self;
+
+    // DIAGNOSTIC: probe for playlist/Mix context (read-only).
+    ytlp_probePlayerForPlaylist(self);
     
     // Store reference in manager so LocalQueueViewController can access it
     [[YTLPLocalQueueManager shared] setCurrentPlayerViewController:self];
@@ -2529,6 +2578,19 @@ static void ytlp_layoutOverlayButtons(id controlsView) {
         if (x < 8.0) x = 8.0;
         CGFloat y = svH - bottomMargin - h;
         if (y < 8.0) y = 8.0; // safety on very short containers
+
+        // TEMP DIAGNOSTIC: record the container geometry so we can see why
+        // portrait placement lands where it does. Throttled to once/sec.
+        {
+            static NSTimeInterval lastBtnDiag = 0;
+            NSTimeInterval nowB = [[NSDate date] timeIntervalSince1970];
+            if (nowB - lastBtnDiag > 1.0) {
+                lastBtnDiag = nowB;
+                NSString *bi = [NSString stringWithFormat:@"sv=%.0fx%.0f land=%d y=%.0f",
+                                svW, svH, containerLandscape ? 1 : 0, y];
+                @try { [[NSUserDefaults standardUserDefaults] setObject:bi forKey:@"ytlp_dbg_btn"]; } @catch (__unused NSException *e) {}
+            }
+        }
 
         if (queueBtn) {
             queueBtn.frame = CGRectMake(x, y, w, h);

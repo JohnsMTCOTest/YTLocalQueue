@@ -210,24 +210,13 @@ static NSArray *ytlp_buildSectionItems(void) {
         if (btnRow) [items addObject:btnRow];
     }
 
-    // TEMP: Mix diagnostic row. Shows what YouTube's native autonav endpoint
-    // looks like (esp. during a Mix), so we can build the Mix takeover against
-    // real class/method names. Removed once we've captured what we need.
-    NSString *mixDbg = [[NSUserDefaults standardUserDefaults] objectForKey:@"ytlp_dbg_mix"];
-    if (mixDbg.length > 0) {
-        id mixRow = ytlp_makeSelectItem(SectionItemClass,
-            [NSString stringWithFormat:@"DBG %@", mixDbg],
+    // TEMP: watch-next-response diagnostic (playlist/Mix response structure).
+    NSString *wnrDbg = [[NSUserDefaults standardUserDefaults] objectForKey:@"ytlp_dbg_wnr"];
+    if (wnrDbg.length > 0) {
+        id wnrRow = ytlp_makeSelectItem(SectionItemClass,
+            [NSString stringWithFormat:@"DBG %@", wnrDbg],
             ^BOOL(id cell, NSUInteger arg1) { return NO; });
-        if (mixRow) [items addObject:mixRow];
-    }
-
-    // TEMP: playlist/Mix diagnostic row (what the player VC exposes on advance).
-    NSString *plDbg = [[NSUserDefaults standardUserDefaults] objectForKey:@"ytlp_dbg_pl"];
-    if (plDbg.length > 0) {
-        id plRow = ytlp_makeSelectItem(SectionItemClass,
-            [NSString stringWithFormat:@"DBG %@", plDbg],
-            ^BOOL(id cell, NSUInteger arg1) { return NO; });
-        if (plRow) [items addObject:plRow];
+        if (wnrRow) [items addObject:wnrRow];
     }
 
     // Version info (non-interactive)
